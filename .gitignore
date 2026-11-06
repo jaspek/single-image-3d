@@ -1,0 +1,22 @@
+# datasets live in data/ but are never committed
+data/*
+!data/README.md
+# method outputs (predictions, visualisations) and model weights
+outputs/
+checkpoints/
+*.pth
+*.ckpt
+*.safetensors
+# python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+# editors / os
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
