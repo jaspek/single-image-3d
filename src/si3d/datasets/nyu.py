@@ -25,6 +25,8 @@ MIN_DEPTH = 1e-3
 MAX_DEPTH = 10.0
 HEIGHT, WIDTH = 480, 640
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
 
 class NYUDepthV2:
     def __init__(self, root: str | Path = "data/nyu"):

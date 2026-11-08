@@ -32,6 +32,7 @@ def main() -> None:
     (out / "subset_nyu.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"wrote {out / 'subset_nyu.txt'} ({len(ids)} frames)")
 
+    """
     pix = Pix3D(a.pix3d_root)
     ids = pix3d_subset(pix, a.n, a.seed)
     lines = [f"# Pix3D subset (unoccluded, untruncated), n={len(ids)}, seed={a.seed}",
@@ -39,7 +40,7 @@ def main() -> None:
     lines += [f"{i}  {pix.entry(i)['category']}  {pix.entry(i)['img']}" for i in ids]
     (out / "subset_pix3d.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"wrote {out / 'subset_pix3d.txt'} ({len(ids)} images)")
-
+    """
 
 if __name__ == "__main__":
     main()
