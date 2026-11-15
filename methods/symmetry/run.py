@@ -31,10 +31,9 @@ sys.path.insert(0, str(ROOT))
 from methods.symmetry.pipeline import Params, Result, reconstruct  # noqa: E402
 from si3d import io  # noqa: E402
 
-STATUS_FILE = Path("results") / "symmetry_status.csv"
 STATUS_COLUMNS = ["id", "category", "status", "n_keypoints", "n_matches", "n_inliers", "support",
-                  "chance", "n_guided", "dense_ratio", "dense_null", "n_normals", "n_sparse",
-                  "n_dense", "n_points", "n_hull", "view_angle_deg", "seconds"]
+                  "support_firm", "chance", "n_guided", "dense_ratio", "dense_null", "n_normals", "n_sparse",
+                  "n_dense", "n_points", "n_hull", "view_angle_deg", "nx", "ny", "nz", "seconds"]
 
 
 def save_figure(res: Result, path: Path, title: str) -> None:
@@ -46,15 +45,15 @@ def save_figure(res: Result, path: Path, title: str) -> None:
     plt.close(fig)
 
 
-def write_status(rows: dict[int, dict]) -> None:
-    """Merge the new rows into results/symmetry_status.csv (keyed by image id)."""
+def write_status(path: Path, rows: dict[int, dict]) -> None:
+    """Merge the new rows into the status file (keyed by image id)."""
     merged: dict[int, dict] = {}
-    if STATUS_FILE.exists():
-        with open(STATUS_FILE, newline="", encoding="utf-8") as f:
+    if path.exists():
+        with open(path, newline="", encoding="utf-8") as f:
             merged = {int(r["id"]): r for r in csv.DictReader(f)}
     merged.update(rows)
-    STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(STATUS_FILE, "w", newline="", encoding="utf-8") as f:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=STATUS_COLUMNS, extrasaction="ignore")
         w.writeheader()
         for i in sorted(merged):
@@ -62,6 +61,7 @@ def write_status(rows: dict[int, dict]) -> None:
 
 
 def run_dataset(a: argparse.Namespace, params: Params) -> None:
+    from methods.symmetry.truth import true_planes
     from si3d.datasets import Pix3D
     try:
         ds = Pix3D(a.data_root)
@@ -77,11 +77,18 @@ def run_dataset(a: argparse.Namespace, params: Params) -> None:
                 ys = np.arange(image.shape[0]) * mask.shape[0] // image.shape[0]
                 xs = np.arange(image.shape[1]) * mask.shape[1] // image.shape[1]
                 mask = mask[ys][:, xs]
-            res = reconstruct(image, mask, ds.intrinsics(i), params)
+            normal = None
+            if a.true_plane:                                # analysis: plane from the CAD model
+                planes = true_planes(ds, i)
+                if not planes:
+                    rows[i] = {"id": i, "category": ds.entry(i)["category"], "status": "model_not_symmetric"}
+                    continue
+                normal = planes[0][0]
+            res = reconstruct(image, mask, ds.intrinsics(i), params, normal=normal)
         except Exception:                                   # keep going, the failure is a result too
             traceback.print_exc()
             res = Result("error")
-        for method, pts in (("symmetry", res.points), ("symmetry_hull", res.hull)):
+        for method, pts in ((a.name, res.points), (a.name + "_hull", res.hull)):
             old = io.pred_dir(method, "pix3d") / f"{i:04d}.npy"
             if res.status == "ok" and len(pts):
                 io.save_shape(method, i, pts)
@@ -89,11 +96,12 @@ def run_dataset(a: argparse.Namespace, params: Params) -> None:
                 old.unlink()                                # no stale prediction from an earlier run
         rows[i] = {"id": i, "category": ds.entry(i)["category"], "status": res.status, **res.info}
         if a.vis:
-            save_figure(res, io.OUTPUTS / "symmetry" / "vis" / f"{i:04d}.png",
+            save_figure(res, io.OUTPUTS / a.name / "vis" / f"{i:04d}.png",
                         f"Pix3D {i} ({ds.entry(i)['category']})")
-    write_status(rows)
+    status_file = Path("results") / f"{a.name}_status.csv"
+    write_status(status_file, rows)
     ok = sum(r["status"] == "ok" for r in rows.values())
-    print(f"{ok} of {len(rows)} images reconstructed; status per image in {STATUS_FILE}")
+    print(f"{ok} of {len(rows)} images reconstructed; status per image in {status_file}")
     for status in sorted({r["status"] for r in rows.values()}):
         print(f"  {status:13s} {sum(r['status'] == status for r in rows.values())}")
 
@@ -119,10 +127,10 @@ def run_demo(a: argparse.Namespace, params: Params) -> None:
                     line += f" {evaluate_shape(res.hull, gt, align='camera')['fscore']:7.3f}"
             print(line)
             if a.vis:
-                save_figure(res, io.OUTPUTS / "symmetry" / "vis" / f"demo_{name}_{az:.0f}.png",
+                save_figure(res, io.OUTPUTS / a.name / "vis" / f"demo_{name}_{az:.0f}.png",
                             f"{name}, azimuth {az:.0f} deg")
     if a.vis:
-        print(f"pictures in {io.OUTPUTS / 'symmetry' / 'vis'}")
+        print(f"pictures in {io.OUTPUTS / a.name / 'vis'}")
 
 
 def main() -> None:
@@ -130,11 +138,18 @@ def main() -> None:
     ap.add_argument("--subset", default="configs/subset_pix3d.txt")
     ap.add_argument("--data-root", default="data/pix3d")
     ap.add_argument("--ids", type=int, nargs="*", help="run these image ids instead of the subset")
+    ap.add_argument("--name", default="symmetry", help="method name of the outputs, for a variant "
+                    "(writes outputs/<name>, outputs/<name>_hull, results/<name>_status.csv)")
     ap.add_argument("--vis", action="store_true", help="save a debug picture per image")
     ap.add_argument("--demo", action="store_true", help="run on rendered test objects")
     ap.add_argument("--demo-objects", nargs="*", default=["chair", "table", "cabinet"])
     ap.add_argument("--demo-azimuths", type=float, nargs="*", default=[15.0, 30.0, 45.0])
-    ap.add_argument("--no-dense", action="store_true", help="feature pairs only")
+    ap.add_argument("--dense", action=argparse.BooleanOptionalAction, default=None,
+                    help="dense search along the epipolar lines (default: on for --demo, off for "
+                         "Pix3D, where most of its matches are wrong)")
+    ap.add_argument("--true-plane", action="store_true",
+                    help="analysis: take the symmetry plane from the CAD model and the annotated "
+                         "pose instead of detecting it (use with --name)")
     ap.add_argument("--no-hull", action="store_true", help="skip the silhouette intersection")
     kinds = {"int": int, "float": float}
     for f in fields(Params):                                # every numeric parameter as a flag
@@ -142,7 +157,8 @@ def main() -> None:
             ap.add_argument(f"--{f.name.replace('_', '-')}", type=kinds[f.type], default=f.default)
     a = ap.parse_args()
     numeric = {f.name: getattr(a, f.name) for f in fields(Params) if f.type in kinds}
-    params = Params(**numeric, dense=not a.no_dense, hull=not a.no_hull)
+    dense = a.demo if a.dense is None else a.dense
+    params = Params(**numeric, dense=dense, hull=not a.no_hull)
     (run_demo if a.demo else run_dataset)(a, params)
 
 

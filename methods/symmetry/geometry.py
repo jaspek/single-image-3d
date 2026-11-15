@@ -127,6 +127,14 @@ def _distinct_lines(n: np.ndarray, m: np.ndarray, inl: np.ndarray, delta: float)
     return (np.diff(bins, axis=1) != 0).sum(axis=1) + 1 - (bins[:, 0] == -1)
 
 
+def line_support(K: np.ndarray, n: np.ndarray, x1: np.ndarray, x2: np.ndarray, bin_px: float = 4.0) -> int:
+    """Number of distinct epipolar lines occupied by the given pairs (all taken as inliers)."""
+    if len(x1) == 0:
+        return 0
+    m = epipolar_planes(pixel_rays(K, x1), pixel_rays(K, x2))
+    return int(_distinct_lines(n[None, :], m, np.ones((1, len(m)), bool), bin_px / K[0, 0])[0])
+
+
 def _score(K, n, x1, x2, r1, r2, m, thr, delta):
     res = epipolar_distance(K, n, x1, x2)
     rho, den = depth_ratio(n, r1, r2)

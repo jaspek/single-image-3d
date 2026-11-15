@@ -29,6 +29,8 @@ class Params:
     max_upscale: float = 3.0
     contrast: float = 0.008       # DoG contrast threshold (image in [0, 1])
     max_keypoints: int = 2500
+    min_cornerness: float = 0.0   # eigenvalue ratio of the structure tensor: > 0 drops keypoints on straight edges
+    min_along: float = 0.15       # a pair is triangulated only if both features vary along the line joining them
     ratio: float = 0.85           # Lowe ratio for the mirrored matching
     ori_tol_deg: float = 40.0     # tolerance of the mirrored gradient direction
     thr: float = 2.0              # epipolar inlier threshold, pixels at working resolution
@@ -41,12 +43,14 @@ class Params:
     dense_normals: int = 6        # surface orientations tried by the dense search
     min_ncc: float = 0.8
     min_dense_ratio: float = 0.3  # share of textured pixels with a dense match that confirms a plane
+    min_view_deg: float = 10.0    # angle between the viewing ray and the symmetry plane: below this
+    max_view_deg: float = 75.0    # the baseline is too short, above it the partner faces are hidden
     seed: int = 0
 
 
 @dataclass
 class Result:
-    status: str                              # ok | no_object | few_features | no_symmetry
+    status: str                              # ok | no_object | few_features | no_symmetry | frontal | side
     normal: np.ndarray | None = None         # symmetry plane n . X = 1 in the camera frame
     points: np.ndarray = field(default_factory=lambda: np.zeros((0, 3)))   # matched points + mirror copies
     hull: np.ndarray = field(default_factory=lambda: np.zeros((0, 3)))     # silhouette intersection surface
@@ -143,7 +147,11 @@ def rotate_about_axis(n: np.ndarray, deg: float) -> np.ndarray:
     return np.array([c * n[0] - s * n[1], s * n[0] + c * n[1], n[2]])
 
 
-def reconstruct(image: np.ndarray, mask: np.ndarray, K: np.ndarray, params: Params | None = None) -> Result:
+def reconstruct(image: np.ndarray, mask: np.ndarray, K: np.ndarray, params: Params | None = None,
+                normal: np.ndarray | None = None) -> Result:
+    """Reconstruct the object in `mask`. With `normal` (unit normal of the symmetry plane in
+    the camera frame, pointing away from the camera) the plane is taken as known and only
+    the reconstruction steps run; used to test them separately from the plane detection."""
     p = params or Params()
     t0 = time.time()
     mask = np.asarray(mask, dtype=bool)
@@ -156,7 +164,7 @@ def reconstruct(image: np.ndarray, mask: np.ndarray, K: np.ndarray, params: Para
     min_sep = 0.03 * float(np.hypot(np.ptp(ys), np.ptp(xs)))
 
     f = feat_mod.detect_and_describe(gray, ndi.binary_dilation(m, iterations=2), contrast=p.contrast,
-                                     max_keypoints=p.max_keypoints)
+                                     max_keypoints=p.max_keypoints, min_cornerness=p.min_cornerness)
     pairs, _ = feat_mod.mirror_matches(f, min_sep, ratio=p.ratio, ori_tol_deg=p.ori_tol_deg)
     info = {"n_keypoints": len(f), "n_matches": len(pairs), "n_inliers": 0, "support": 0, "chance": 0.0}
     debug = {"gray": gray, "mask": m, "K": Kw, "A": A, "features": f, "pairs": pairs,
@@ -166,36 +174,59 @@ def reconstruct(image: np.ndarray, mask: np.ndarray, K: np.ndarray, params: Para
         info["seconds"] = round(time.time() - t0, 2)
         return Result(status, normal=normal, info=info, debug=debug)
 
-    if len(pairs) < 4:
-        return stop("few_features")
-    fit = geo.ransac_plane(Kw, f.xy[pairs[:, 0]], f.xy[pairs[:, 1]], thr=p.thr, n_hyp=p.n_hyp, seed=p.seed)
-    info.update(n_inliers=int(fit.inliers.sum()), support=fit.support, chance=round(fit.chance, 2))
-    debug["inliers"] = fit.inliers
-    # A plane with strong feature support is accepted as it is; one with weak support has to
-    # be confirmed by the dense search below.
-    if fit.support < max(6.0, fit.chance + 3.0 * np.sqrt(fit.chance) + 2.0):
-        return stop("no_symmetry", fit.normal)
+    centre_ray = geo.pixel_rays(Kw, np.array([[xs.mean(), ys.mean()]]))[0]
+    centre_ray /= np.linalg.norm(centre_ray)
 
-    n = fit.normal
-    use = pairs[fit.inliers]
-    if p.guided:
-        for _ in range(2):
-            g = guided_matches(f, Kw, n, p.thr, min_sep, ori_tol_deg=p.ori_tol_deg)
-            if len(g) <= len(use):
-                break
-            n_new = geo.refine_normal(Kw, n, f.xy[g[:, 0]], f.xy[g[:, 1]], p.thr)
-            use, n = g, (n_new if n_new @ n > 0 else -n_new)
-        info["n_guided"] = len(use)
+    def note_plane(normal: np.ndarray) -> float:
+        """Record the plane and return the angle between the ray to the object centre and
+        the plane: 0 deg is a frontal view of the object, 90 deg a view straight from the side."""
+        view = float(np.degrees(np.arcsin(min(1.0, abs(float(normal @ centre_ray))))))
+        info.update(nx=round(float(normal[0]), 4), ny=round(float(normal[1]), 4),
+                    nz=round(float(normal[2]), 4), view_angle_deg=round(view, 1))
+        return view
+
+    if normal is None:
+        if len(pairs) < 4:
+            return stop("few_features")
+        fit = geo.ransac_plane(Kw, f.xy[pairs[:, 0]], f.xy[pairs[:, 1]], thr=p.thr, n_hyp=p.n_hyp, seed=p.seed)
+        info.update(n_inliers=int(fit.inliers.sum()), support=fit.support, chance=round(fit.chance, 2))
+        debug["inliers"] = fit.inliers
+        note_plane(fit.normal)
+        # inlier pairs that cannot slide along an edge: the ones that really locate a partner
+        firm = fit.inliers & (feat_mod.along_line(f, pairs[:, 0], pairs[:, 1]) >= p.min_along)
+        info["support_firm"] = geo.line_support(Kw, fit.normal, f.xy[pairs[firm, 0]], f.xy[pairs[firm, 1]])
+        # A plane with strong feature support is accepted as it is; one with weak support has
+        # to be confirmed by the dense search below.
+        if fit.support < max(6.0, fit.chance + 3.0 * np.sqrt(fit.chance) + 2.0):
+            return stop("no_symmetry", fit.normal)
+        n, use, confirmed = fit.normal, pairs[fit.inliers], fit.found
+        if p.guided:
+            for _ in range(2):
+                g = guided_matches(f, Kw, n, p.thr, min_sep, ori_tol_deg=p.ori_tol_deg)
+                if len(g) <= len(use):
+                    break
+                n_new = geo.refine_normal(Kw, n, f.xy[g[:, 0]], f.xy[g[:, 1]], p.thr)
+                use, n = g, (n_new if n_new @ n > 0 else -n_new)
+    else:
+        n = np.asarray(normal, dtype=np.float64) / np.linalg.norm(normal)
+        use, confirmed = np.zeros((0, 2), np.int64), True
+        if len(f) > 1:
+            use = guided_matches(f, Kw, n, p.thr, min_sep, ori_tol_deg=p.ori_tol_deg)
+    info["n_guided"] = len(use)
     debug["normal"] = n
+    view = note_plane(n)
+    if view < p.min_view_deg:
+        return stop("frontal", n)
+    if view > p.max_view_deg:
+        return stop("side", n)
 
-    confirmed = fit.found
     step = max(p.dense_step, int(np.ceil(np.sqrt(m.sum() / p.dense_max_pixels))))
     normals = dense_mod.plane_normals(n, p.dense_normals)
     if p.dense:
-        def quick_scan(normal: np.ndarray):
+        def quick_scan(plane: np.ndarray):
             """Dense search on a coarse grid; share of the textured pixels that find a partner."""
-            c = dense_mod.epipolar_scan(gray, m, Kw, normal, step=4 * step,
-                                        normals=dense_mod.plane_normals(normal, p.dense_normals),
+            c = dense_mod.epipolar_scan(gray, m, Kw, plane, step=4 * step,
+                                        normals=dense_mod.plane_normals(plane, p.dense_normals),
                                         min_ncc=p.min_ncc, despeckle=False, hull=False)
             return c, len(c.points) / max(c.n_textured, 1)
 
@@ -218,6 +249,7 @@ def reconstruct(image: np.ndarray, mask: np.ndarray, K: np.ndarray, params: Para
 
     X, _, valid = geo.triangulate(Kw, n, f.xy[use[:, 0]], f.xy[use[:, 1]])
     valid &= geo.epipolar_distance(Kw, n, f.xy[use[:, 0]], f.xy[use[:, 1]]) < p.thr
+    valid &= feat_mod.along_line(f, use[:, 0], use[:, 1]) >= p.min_along     # no depth from a sliding pair
     use, X = use[valid], X[valid]
     half = [X]
     hull = np.zeros((0, 3))
@@ -226,25 +258,23 @@ def reconstruct(image: np.ndarray, mask: np.ndarray, K: np.ndarray, params: Para
                                     match=p.dense, hull=p.hull)
         if p.dense:
             half.append(d.points)
+        hull = d.hull
         debug["dense"] = d
     half = np.concatenate(half)
     keep = np.ones(len(half), bool)
-    if len(half) >= 8:
-        box = main_box(X if len(X) >= 8 else half, n)
+    if len(half) >= 30:
+        box = main_box(X if len(X) >= 30 else half, n)
         keep = in_box(half, n, box)
-        if p.hull:
-            # two silhouettes leave the shape open along the symmetry plane, the more the
-            # smaller the view angle; cut it where the matched points end
-            hull = d.hull[in_box(d.hull, n, box)]
-            hull = np.r_[hull, geo.reflect(hull, n)]
+        # two silhouettes leave the shape open along the symmetry plane, the more the smaller
+        # the view angle; with enough matched points, cut it where they end
+        hull = hull[in_box(hull, n, box)]
     debug.update(used=use[keep[:len(X)]], sparse=X[keep[:len(X)]], kept=keep[len(X):])
     half = half[keep]
     points = np.r_[half, geo.reflect(half, n)]
+    hull = np.r_[hull, geo.reflect(hull, n)]
     info.update(n_sparse=int(keep[:len(X)].sum()), n_dense=int(keep[len(X):].sum()),
                 n_points=len(points), n_hull=len(hull))
-    if len(points) == 0:
+    if len(points) == 0 and len(hull) == 0:
         return stop("no_symmetry", n)
-    centre = points.mean(axis=0)                                   # on the plane: points come in mirror pairs
-    info["view_angle_deg"] = round(float(np.degrees(np.arcsin(min(1.0, 1.0 / np.linalg.norm(centre))))), 1)
     info["seconds"] = round(time.time() - t0, 2)
     return Result("ok", n, points, hull, info, debug)

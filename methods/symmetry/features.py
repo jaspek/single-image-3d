@@ -24,6 +24,7 @@ class Features:
     angle: np.ndarray     # (N,) dominant gradient direction in radians
     desc: np.ndarray      # (N, 128) unit-length descriptors
     loc: np.ndarray       # (N,) keypoint index; one keypoint can have two orientations
+    tensor: np.ndarray    # (N, 3) gradient structure tensor (xx, xy, yy) around the keypoint, trace 1
 
     def __len__(self) -> int:
         return len(self.xy)
@@ -118,7 +119,10 @@ def _sample(stack: np.ndarray, level: np.ndarray, yy: np.ndarray, xx: np.ndarray
 
 def _orientations(gx, gy, level, y, x, sigma, n_bins: int = 36, peak: float = 0.8):
     """Dominant gradient directions from a Gaussian-weighted orientation histogram.
-    Returns (index of the keypoint, angle); a second peak above 80 % gives a second entry."""
+    Returns (index of the keypoint, angle, cornerness, tensor); a second peak above 80 %
+    gives a second entry. The last two are per keypoint: the gradient structure tensor
+    (xx, xy, yy, scaled to trace 1) in the same window and the ratio of its eigenvalues,
+    which is about 0 on a straight edge and 1 for a blob."""
     lin = np.linspace(-1.0, 1.0, 13)
     oy, ox = np.meshgrid(lin, lin, indexing="ij")
     inside = oy ** 2 + ox ** 2 <= 1.0
@@ -126,7 +130,11 @@ def _orientations(gx, gy, level, y, x, sigma, n_bins: int = 36, peak: float = 0.
     radius = 4.5 * sigma                               # 3 standard deviations of a 1.5 sigma window
     yy, xx = y[:, None] + radius[:, None] * oy, x[:, None] + radius[:, None] * ox
     sx, sy = _sample(gx, level, yy, xx), _sample(gy, level, yy, xx)
-    weight = np.hypot(sx, sy) * np.exp(-4.5 * (oy ** 2 + ox ** 2))[None, :]
+    window = np.exp(-4.5 * (oy ** 2 + ox ** 2))[None, :]
+    weight = np.hypot(sx, sy) * window
+    jxx, jyy, jxy = (window * sx * sx).sum(1), (window * sy * sy).sum(1), (window * sx * sy).sum(1)
+    root = np.sqrt((jxx - jyy) ** 2 + 4.0 * jxy ** 2)
+    corner = (jxx + jyy - root) / np.maximum(jxx + jyy + root, 1e-20)
     bins = np.floor((np.arctan2(sy, sx) % (2 * np.pi)) / (2 * np.pi) * n_bins).astype(np.int64) % n_bins
     N = len(y)
     hist = np.bincount((np.arange(N)[:, None] * n_bins + bins).ravel(), weights=weight.ravel(),
@@ -145,7 +153,8 @@ def _orientations(gx, gy, level, y, x, sigma, n_bins: int = 36, peak: float = 0.
     kp, b = kp[ok], b[ok]
     h0, hl, hr = hist[kp, b], left[kp, b], right[kp, b]
     shift = 0.5 * (hl - hr) / np.where(np.abs(hl - 2 * h0 + hr) > 1e-12, hl - 2 * h0 + hr, 1.0)
-    return kp, ((b + 0.5 + shift) * (2 * np.pi / n_bins)) % (2 * np.pi)
+    tensor = np.c_[jxx, jxy, jyy] / np.maximum(jxx + jyy, 1e-20)[:, None]
+    return kp, ((b + 0.5 + shift) * (2 * np.pi / n_bins)) % (2 * np.pi), corner, tensor
 
 
 def _describe(gx, gy, level, y, x, sigma, angle) -> np.ndarray:
@@ -189,8 +198,11 @@ def _describe(gx, gy, level, y, x, sigma, angle) -> np.ndarray:
 
 def detect_and_describe(gray: np.ndarray, mask: np.ndarray | None = None, n_octaves: int = 4,
                         n_scales: int = 3, sigma0: float = 1.6, contrast: float = 0.008,
-                        edge_ratio: float = 10.0, max_keypoints: int = 2500) -> Features:
-    """Keypoints and descriptors of a grey image in [0, 1]; keypoints outside `mask` are dropped."""
+                        edge_ratio: float = 10.0, max_keypoints: int = 2500,
+                        min_cornerness: float = 0.0) -> Features:
+    """Keypoints and descriptors of a grey image in [0, 1]; keypoints outside `mask` are dropped.
+    min_cornerness > 0 also drops keypoints on straight edges: they can slide along the edge,
+    so a match between two of them says little about where the partner is."""
     gray = np.asarray(gray, dtype=np.float32)
     parts = []
     for o, octave in enumerate(_pyramid(gray, n_octaves, n_scales, sigma0)):
@@ -205,12 +217,12 @@ def detect_and_describe(gray: np.ndarray, mask: np.ndarray | None = None, n_octa
         parts.append((o, octave, s, y, x, c))
     if not parts:
         return Features(np.zeros((0, 2)), np.zeros(0), np.zeros(0), np.zeros((0, 128), np.float32),
-                        np.zeros(0, np.int64))
+                        np.zeros(0, np.int64), np.zeros((0, 3)))
     # strongest keypoints over all octaves
     contrast_all = np.concatenate([p[5] for p in parts])
     cut = np.sort(contrast_all)[-max_keypoints] if len(contrast_all) > max_keypoints else 0.0
 
-    xy, scale, angle, desc, loc = [], [], [], [], []
+    xy, scale, angle, desc, loc, tensor = [], [], [], [], [], []
     n_loc = 0
     for o, octave, s, y, x, c in parts:
         keep = c >= cut
@@ -220,15 +232,23 @@ def detect_and_describe(gray: np.ndarray, mask: np.ndarray | None = None, n_octa
         gy, gx = np.gradient(octave, axis=(1, 2))
         level = np.clip(np.rint(s), 0, octave.shape[0] - 1)
         sigma = sigma0 * 2.0 ** (s / n_scales)         # in pixels of this octave
-        kp, ang = _orientations(gx, gy, level, y, x, sigma)
+        kp, ang, corner, tens = _orientations(gx, gy, level, y, x, sigma)
+        kp, ang = kp[corner[kp] >= min_cornerness], ang[corner[kp] >= min_cornerness]
+        if len(kp) == 0:
+            n_loc += len(s)
+            continue
         desc.append(_describe(gx, gy, level[kp], y[kp], x[kp], sigma[kp], ang))
         xy.append(np.c_[x[kp], y[kp]] * 2 ** o)
         scale.append(sigma[kp] * 2 ** o)
         angle.append(ang)
         loc.append(kp + n_loc)
+        tensor.append(tens[kp])
         n_loc += len(s)
+    if not xy:
+        return Features(np.zeros((0, 2)), np.zeros(0), np.zeros(0), np.zeros((0, 128), np.float32),
+                        np.zeros(0, np.int64), np.zeros((0, 3)))
     return Features(np.concatenate(xy), np.concatenate(scale), np.concatenate(angle),
-                    np.concatenate(desc), np.concatenate(loc))
+                    np.concatenate(desc), np.concatenate(loc), np.concatenate(tensor))
 
 
 # ---------------------------------------------------------------------- mirrored matching
@@ -249,6 +269,19 @@ def orientation_deviation(f: Features, i: np.ndarray, j: np.ndarray) -> np.ndarr
     dxy = f.xy[j] - f.xy[i]
     beta = np.arctan2(dxy[..., 1], dxy[..., 0])
     return np.abs(_wrap(f.angle[i] + f.angle[j] - 2 * beta - np.pi))
+
+
+def along_line(f: Features, i: np.ndarray, j: np.ndarray) -> np.ndarray:
+    """Share of the gradient energy around each feature of a pair that lies along the line
+    joining the pair, the smaller of the two. Near 0 the feature sits on an edge that runs
+    along that line: it can slide on it, so the pair does not say where the partner is."""
+    d = f.xy[j] - f.xy[i]
+    d = d / np.maximum(np.linalg.norm(d, axis=1, keepdims=True), 1e-12)
+
+    def share(t: np.ndarray) -> np.ndarray:
+        return t[:, 0] * d[:, 0] ** 2 + 2 * t[:, 1] * d[:, 0] * d[:, 1] + t[:, 2] * d[:, 1] ** 2
+
+    return np.minimum(share(f.tensor[i]), share(f.tensor[j]))
 
 
 def mirror_matches(f: Features, min_sep: float, ratio: float = 0.85, max_dist: float = 0.75,
@@ -281,6 +314,8 @@ def mirror_matches(f: Features, min_sep: float, ratio: float = 0.85, max_dist: f
     dist2 = np.sqrt(np.maximum(2.0 - 2.0 * s2, 0.0))
     ok = (s1 > -1.0) & (dist1 < max_dist) & (dist1 < ratio * dist2)
     i, j, dist = np.nonzero(ok)[0], best[ok], dist1[ok]
+    if len(i) == 0:
+        return np.zeros((0, 2), np.int64), np.zeros(0)
     # one entry per unordered pair of keypoint locations, the closest descriptors win
     a, b = np.minimum(f.loc[i], f.loc[j]), np.maximum(f.loc[i], f.loc[j])
     order = np.lexsort((dist, b, a))

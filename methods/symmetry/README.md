@@ -18,7 +18,8 @@ Camera frame: x right, y down, z forward. The object is symmetric about the plan
 - Every reconstructed point also gives its mirror image, which is usually the side the
   camera does not see.
 - The baseline is `2 d`. A camera in the symmetry plane (frontal view) has no baseline and
-  gets no depth; the depth error grows as the view angle to the plane shrinks.
+  gets no depth. The view angle (between the ray to the object and the plane) is the
+  quantity that decides how well depth is defined.
 
 ## Pipeline (`pipeline.reconstruct`)
 
@@ -27,16 +28,18 @@ Camera frame: x right, y down, z forward. The object is symmetric about the plan
    mirrored patch is a fixed permutation of the descriptor, so features are matched against
    the mirrored descriptors of all other features, with ratio test.
 3. RANSAC over two-pair samples for `n` (`geometry.ransac_plane`). The score is the number
-   of distinct epipolar lines with an inlier, so matches sliding along one straight edge
-   count once. The plane is accepted if that number is clearly above what unrelated pairs
-   reach. A weakly supported plane has to be confirmed by step 5 on a coarse grid, against
-   two deliberately wrong planes.
+   of distinct epipolar lines with an inlier. The plane is accepted if that number is clearly
+   above what unrelated pairs reach, and rejected as `frontal` below 10 deg or `side` above
+   75 deg view angle.
 4. Guided matching along the epipolar lines, non-linear refinement of `n`, triangulation.
+   Only pairs whose features vary along the joining line are triangulated: a pair on one
+   straight edge can slide along it and has no defined depth.
 5. Dense search (`dense.py`): for every third object pixel the partner is searched along
    its epipolar line by normalised cross-correlation. The patch is mirrored through 3D for
    a few surface orientations perpendicular to the symmetry plane (front, top, seat: faces
-   that are their own mirror image). Checks: uniqueness, search back from the partner,
-   mirror image must beat shifted copy, larger window, depth agrees with the neighbours.
+   that are their own mirror image). Checks: structure along the line, uniqueness, search
+   back from the partner, mirror image must beat shifted copy, larger window, depth agrees
+   with the neighbours. On by default only for the rendered objects, see below.
 6. Silhouette intersection: the partner must fall inside the mask, which bounds the depth of
    every pixel. This is a two-view visual hull with the mirrored camera as second view.
 
@@ -48,47 +51,74 @@ python methods/symmetry/run.py --vis               # the Pix3D subset
 python methods/symmetry/run.py --ids 12 345 --vis  # single images
 python scripts/eval_shape.py --method symmetry --align camera
 python scripts/eval_shape.py --method symmetry_hull --align camera
+python methods/symmetry/eval_plane.py              # detected plane against the CAD model
+
+# analysis: the same reconstruction with the true plane from the CAD model and pose
+python methods/symmetry/run.py --name symmetry_trueplane --true-plane
+python scripts/eval_shape.py --method symmetry_trueplane_hull --align camera
 ```
 
 | output | content |
 |---|---|
-| `outputs/symmetry/pix3d/<id>.npy` | feature pairs and dense matches with their mirror copies |
-| `outputs/symmetry_hull/pix3d/<id>.npy` | surface of the silhouette intersection, cut to the box of the matched points |
-| `outputs/symmetry/vis/<id>.png` | matches, depth of the dense matches, top and front view |
-| `results/symmetry_status.csv` | per image: status, counts, view angle, seconds |
+| `outputs/symmetry/pix3d/<id>.npy` | matched points with their mirror copies |
+| `outputs/symmetry_hull/pix3d/<id>.npy` | surface of the silhouette intersection |
+| `outputs/symmetry/vis/<id>.png` | matches, epipolar lines, top and front view |
+| `results/symmetry_status.csv` | per image: status, counts, detected normal, view angle |
+| `results/symmetry_plane.csv` | per image: error of the detected plane, true view angle |
 
 Points are in the camera frame, up to scale, so `--align camera` (one scale factor, nothing
-else) is the fair evaluation; `--align icp` gives the number under the same protocol as the
-methods with their own output frame. Status values: `ok`, `no_symmetry` (no plane with
-enough support), `few_features`, `no_object`, `error`. Images without a plane get no
-prediction file. `--no-dense` keeps the feature pairs only, `--help` lists the parameters.
+else) is the fair evaluation. Status values: `ok`, `no_symmetry` (no plane with enough
+support), `frontal`, `side`, `few_features`, `no_object`, `error`. Images without an
+accepted plane get no prediction file. `--help` lists the parameters.
 
-## Controlled case
+## Results
 
-`synthetic.py` renders box-built objects with a mirror-symmetric texture, so the plane and
-the shape are known. `run.py --demo` prints (F-score at 5 % of the object size, camera alignment):
+Rendered objects with a mirror-symmetric texture (`run.py --demo`, F-score at 5 % of the
+object size, camera alignment). Plane and shape are known here.
 
 | object | azimuth | plane error | accuracy | completeness | F-score | hull F-score |
 |---|---|---|---|---|---|---|
-| chair | 15 / 30 / 45 / 60 deg | 0.0 / 1.4 / 0.1 / 1.2 deg | 0.007 / 0.010 / 0.007 / 0.007 | 0.023 / 0.025 / 0.038 / 0.050 | 0.98 / 0.97 / 0.92 / 0.82 | 0.45 / 0.45 / 0.57 / 0.57 |
-| table | 15 / 30 deg | 0.1 / 2.2 deg | 0.008 / 0.036 | 0.048 / 0.025 | 0.92 / 0.94 | 0.43 / 0.40 |
-| table | 45 / 60 deg | no plane found | | | | |
-| cabinet | 15 / 30 / 45 deg | 0.0 / 0.0 / 0.5 deg | 0.006 / 0.006 / 0.006 | 0.105 / 0.075 / 0.048 | 0.55 / 0.59 / 0.68 | 0.41 / 0.43 / 0.47 |
-| cabinet | 60 deg | no plane found | | | | |
+| chair | 15 / 30 / 45 / 60 deg | 0.0 / 1.4 / 0.1 / 1.2 deg | 0.005 / 0.007 / 0.009 / 0.007 | 0.031 / 0.034 / 0.050 / 0.047 | 0.91 / 0.88 / 0.79 / 0.84 | 0.44 / 0.45 / 0.57 / 0.61 |
+| table | 15 / 30 deg | 0.1 / 2.2 deg | 0.015 / 0.088 | 0.051 / 0.047 | 0.89 / 0.77 | 0.36 / 0.40 |
+| table | 45 / 60 deg | no plane accepted | | | | |
+| cabinet | 15 / 30 / 45 deg | 0.0 / 0.0 / 0.5 deg | 0.006 / 0.006 / 0.006 | 0.110 / 0.077 / 0.051 | 0.55 / 0.58 / 0.66 | 0.43 / 0.41 / 0.47 |
+| cabinet | 60 deg | no plane accepted | | | | |
+
+Pix3D subset, 50 photos, 38 of them with a mirror-symmetric CAD model. Parameters were set
+on 45 other Pix3D images, not on the subset.
+
+| question | answer |
+|---|---|
+| best plane candidate within 5 deg of a symmetry plane of the model | 8 of 38 |
+| plane accepted | 5 of 50 |
+| accepted planes within 5 deg | 0 (one at 5.9 deg) |
+| `symmetry`, matched points, 5 images | accuracy 0.095, completeness 0.192, F-score 0.12 |
+| `symmetry_hull`, 5 images | accuracy 0.206, completeness 0.038, F-score 0.33 |
+| `symmetry_trueplane_hull`, true plane given, 29 images with 10 to 75 deg view angle | accuracy 0.122, completeness 0.040, F-score 0.48 |
+| dense matches with the true plane within 3 % of the true depth (other 45 images) | 29 % |
 
 ## Where it breaks
 
-- No texture: no features, no dense matches. Only the silhouette intersection is left, and
-  it needs the plane.
-- Faces whose mirror image is hidden (the side of a cabinet) cannot be reconstructed, so
-  completeness stays low for box-like objects.
-- Horizontal faces seen at a flat angle from far off the symmetry plane: the mirrored
-  texture is strongly sheared and the features stop matching (table at 45 deg and more).
-- Repeated parts along the symmetry direction (legs, drawers) can pair with the wrong
-  partner and land at a wrong depth.
+On the rendered objects the method works as long as the view is neither frontal nor from
+the side. On the photos the plane detection fails, and so does the dense search:
+
+- Mirrored features need texture. Most furniture surfaces have none, so the keypoints sit
+  on edges. Matches between points of one straight edge, or of parallel edges such as bed
+  slats and door frames, slide along the edge. They agree with any epipole on that line,
+  and many parallel edges make RANSAC lock onto their common direction. Where that
+  direction happens to be the symmetry normal the plane is right, but for the wrong reason
+  and with meaningless depths.
+- Real mirror partners look different: one side is lit, the other shaded, cushions and
+  books are not arranged symmetrically.
+- Repeated parts along the symmetry direction (slats, legs, drawers) give several equally
+  good partners on an epipolar line. A patch correlation picks one of them at random; a
+  higher correlation does not mean a better match (matches above 0.97 are right less often
+  than the rest).
+- Many product photos are frontal: 8 of the 38 symmetric subset images have a view angle
+  below 10 deg. The plane is easiest to find there and useless for depth.
+- Faces whose mirror image is hidden (the side of a cabinet) cannot be matched.
+- The silhouette intersection needs only the plane and the mask and is the one part that
+  carries over to photos. It is open along the symmetry plane, the more the smaller the
+  view angle, and two silhouettes cannot see concavities.
 - The component of `n` along the viewing direction comes from perspective convergence only
   and is the least accurate; an error there stretches the shape in depth.
-- The silhouette intersection is open along the symmetry plane; the smaller the view angle,
-  the longer it gets.
-- Views near the symmetry plane (small baseline) and views from the side (partner faces
-  hidden).

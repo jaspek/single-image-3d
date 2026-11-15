@@ -204,3 +204,68 @@ def test_no_plane_without_symmetry():
 def test_empty_mask():
     res = reconstruct(np.zeros((100, 100, 3), np.uint8), np.zeros((100, 100), bool), K)
     assert res.status == "no_object"
+
+
+# ------------------------------------------------------- cases found on the real images
+
+def _features(xy, tensor):
+    n = len(xy)
+    desc = np.zeros((n, 128), np.float32)
+    desc[np.arange(n), np.arange(n)] = 1.0                       # nothing looks like anything else
+    return features.Features(np.asarray(xy, float), np.full(n, 2.0), np.zeros(n), desc, np.arange(n),
+                             np.asarray(tensor, float))
+
+
+def test_no_matches_is_not_an_error():
+    f = _features([[10, 10], [100, 40], [60, 90]], [[0.5, 0, 0.5]] * 3)
+    pairs, dist = features.mirror_matches(f, min_sep=5.0)
+    assert pairs.shape == (0, 2) and len(dist) == 0
+
+
+def test_a_pair_on_one_edge_can_slide():
+    """Two features on a horizontal edge (gradient along y): joined by a horizontal line they
+    are not located along it, joined to a feature above they are."""
+    edge, blob = [0.0, 0.0, 1.0], [0.5, 0.0, 0.5]
+    f = _features([[10, 50], [90, 50], [10, 10]], [edge, edge, blob])
+    along = features.along_line(f, np.array([0, 0]), np.array([1, 2]))
+    assert along[0] == pytest.approx(0.0) and along[1] == pytest.approx(0.5)
+
+
+def test_line_support_counts_lines_not_pairs():
+    x1, x2, n, _, _, _ = mirror_pairs(30.0, n_pts=40)
+    assert geometry.line_support(K, n, x1, x2) > 15
+    same = geometry.line_support(K, n, np.repeat(x1[:1], 10, axis=0), np.repeat(x2[:1], 10, axis=0))
+    assert same == 1 and geometry.line_support(K, n, x1[:0], x2[:0]) == 0
+
+
+def test_model_symmetry_planes():
+    from methods.symmetry.truth import model_symmetry
+    count = {name: len(model_symmetry(synthetic.OBJECTS[name]())) for name in ("chair", "table", "cabinet")}
+    assert count == {"chair": 1, "table": 2, "cabinet": 3}
+    axis, centre = model_symmetry(synthetic.chair())[0]
+    assert np.allclose(axis, [1, 0, 0]) and abs(centre[0]) < 1e-9
+
+
+def test_reconstruct_with_a_given_plane(chair):
+    n_true, _ = chair.plane
+    res = reconstruct(chair.image, chair.mask, chair.K, Params(work_size=480, dense_step=4), normal=n_true)
+    assert res.status == "ok" and np.allclose(res.normal, n_true)
+    m = evaluate_shape(res.points, chair.mesh_in_camera(), align="camera")
+    assert m["fscore"] > 0.85
+
+
+def test_frontal_view_is_rejected():
+    """A camera in the symmetry plane has no baseline: the plane is found, the depth is not."""
+    r = synthetic.make("chair", azimuth=3.0)
+    res = reconstruct(r.image, r.mask, r.K, Params(work_size=480, dense_step=4))
+    assert res.status == "frontal" and len(res.points) == 0
+    assert angle_deg(res.normal, r.plane[0]) < 3.0
+
+
+def test_silhouette_intersection_alone(chair):
+    """Without the dense search and without usable feature pairs the hull is still returned."""
+    n_true, _ = chair.plane
+    res = reconstruct(chair.image, chair.mask, chair.K, Params(work_size=480, dense=False, min_along=2.0),
+                      normal=n_true)
+    assert res.status == "ok" and len(res.points) == 0 and len(res.hull) > 1000
+    assert evaluate_shape(res.hull, chair.mesh_in_camera(), align="camera")["fscore"] > 0.3

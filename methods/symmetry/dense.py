@@ -72,13 +72,14 @@ class _Scanner:
     """Search along the epipolar lines of arbitrary pixels of one image."""
 
     def __init__(self, gray, mask, K, n, normals, dt, half, spacing, min_ncc, uniqueness,
-                 min_std, min_shift, chunk):
+                 min_std, min_along, min_shift, chunk):
         self.mask, self.K, self.n, self.normals = mask, K, n, normals
         self.Kinv = np.linalg.inv(K)
         self.v = K @ n
         self.dt, self.min_ncc, self.uniqueness = dt, min_ncc, uniqueness
-        self.min_std, self.min_shift, self.chunk = min_std, min_shift, chunk
+        self.min_std, self.min_along, self.min_shift, self.chunk = min_std, min_along, min_shift, chunk
         self.smooth = ndi.gaussian_filter(np.asarray(gray, dtype=np.float32), 1.0)
+        self.grad_y, self.grad_x = np.gradient(self.smooth)
         offs = np.arange(-half, half + 1) * spacing
         self.oy, self.ox = (a.ravel() for a in np.meshgrid(offs, offs, indexing="ij"))
         # Patches must lie on the object: next to the silhouette they would mostly compare
@@ -177,6 +178,13 @@ class _Scanner:
         ref = self._patches(px, 1.0)
         ref_norm = np.linalg.norm(ref, axis=1)
         textured = (ref_norm / np.sqrt(S) >= self.min_std) & self._lookup(self.inner, px[:, 0], px[:, 1])
+        # The patch must change along the epipolar line. An edge that runs along the line looks
+        # the same wherever the partner is put on it, so it cannot tell the depth.
+        coords = [px[:, 1:2] + self.oy[None, :], px[:, 0:1] + self.ox[None, :]]
+        gx = ndi.map_coordinates(self.grad_x, coords, order=1, mode="nearest")
+        gy = ndi.map_coordinates(self.grad_y, coords, order=1, mode="nearest")
+        along = ((gx * u[:, 0:1] + gy * u[:, 1:2]) ** 2).sum(axis=1)
+        textured &= along >= self.min_along * (gx ** 2 + gy ** 2).sum(axis=1)
 
         out = {"ok": np.zeros(P, bool), "tried": np.zeros(P, bool), "shift": np.zeros(P),
                "score": np.zeros(P), "normal": np.zeros(P, dtype=np.int64), "hull_idx": [], "hull_z": []}
@@ -248,7 +256,8 @@ class _Scanner:
 def epipolar_scan(gray: np.ndarray, mask: np.ndarray, K: np.ndarray, n: np.ndarray,
                   step: int = 3, dt: float = 1.5, half: int = 2, spacing: float = 3.0,
                   normals: np.ndarray | None = None, min_ncc: float = 0.8,
-                  uniqueness: float = 0.8, min_std: float = 0.02, min_shift: float = 4.0,
+                  uniqueness: float = 0.8, min_std: float = 0.02, min_along: float = 0.2,
+                  min_shift: float = 4.0,
                   reciprocal: float | None = 2.5, mirror_margin: float | None = 0.05,
                   verify_ncc: float | None = 0.7, despeckle: bool = True, match: bool = True,
                   hull: bool = True, chunk: int = 96) -> DenseResult:
@@ -260,6 +269,8 @@ def epipolar_scan(gray: np.ndarray, mask: np.ndarray, K: np.ndarray, n: np.ndarr
     normals     (M, 3) surface orientations tried per candidate, default plane_normals(n, 6)
     min_ncc     minimum correlation of an accepted match
     uniqueness  the best mismatch (1 - ncc) must be below this fraction of the runner-up
+    min_std     minimum contrast of a patch
+    min_along   minimum share of the gradient energy of a patch that lies along the line
     min_shift   ignore partners closer than this (a pixel always matches itself)
     reciprocal  the search started at the partner must come back to within this many pixels
     mirror_margin  the mirrored comparison must beat the unmirrored one by this much
@@ -276,7 +287,7 @@ def epipolar_scan(gray: np.ndarray, mask: np.ndarray, K: np.ndarray, n: np.ndarr
     if normals is None:
         normals = plane_normals(n, 6)
     scan = _Scanner(gray, mask, K, n, normals, dt, half, spacing, min_ncc, uniqueness, min_std,
-                    min_shift, chunk)
+                    min_along, min_shift, chunk)
     fwd = scan.search(px, hull=hull, match=match)
     ok = fwd["ok"]
     if match and reciprocal is not None and ok.any():
@@ -294,6 +305,11 @@ def epipolar_scan(gray: np.ndarray, mask: np.ndarray, K: np.ndarray, n: np.ndarr
         zmap[on] = np.where(ok, fwd["depth"], np.nan)
         ok &= _despeckle(zmap, rel_tol=0.01 * step)[on]
     sel = np.nonzero(ok)[0]
-    hull_pts = fwd["hull_z"][:, None] * fwd["rays"][fwd["hull_idx"]] if hull else np.zeros((0, 3))
+    hull_pts = np.zeros((0, 3))
+    if hull and len(fwd["hull_z"]):
+        # A ray whose mirrored direction also points into the mask never leaves the second
+        # cone, its exit lies at an arbitrary depth. Keep the bounded part of the surface.
+        bounded = fwd["hull_z"] <= 3.0 * np.median(fwd["hull_z"])
+        hull_pts = fwd["hull_z"][bounded, None] * fwd["rays"][fwd["hull_idx"][bounded]]
     return DenseResult(px[sel], fwd["partner"][sel], fwd["depth"][sel, None] * fwd["rays"][sel],
                        fwd["score"][sel], fwd["normal"][sel], hull_pts, int(fwd["tried"].sum()))
