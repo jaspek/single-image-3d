@@ -18,4 +18,7 @@ frame), `none`. Numbers with different `align` are not directly comparable. The 
 of the summary counts the images that have a prediction.
 
 - `symmetry_status.csv`: one row per image for the symmetry method (status, number of
-  matches, view angle), including the images where no symmetry plane was found.
+  matches, detected plane, view angle), including the images where no plane was accepted.
+- `symmetry_plane.csv`: the detected plane against the symmetry planes of the CAD model.
+- `shape/symmetry_trueplane_hull.csv` is an analysis row, not a method: the silhouette
+  intersection with the symmetry plane taken from the CAD model and the annotated pose.

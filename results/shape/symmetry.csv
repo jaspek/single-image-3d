@@ -1,0 +1,6 @@
+id,category,accuracy,completeness,chamfer,fscore,tau,n_pred,align,gt_frame
+217,bed,0.111795,0.147249,0.259045,0.261262,0.05,32,camera,camera
+349,bed,0.116701,0.142273,0.258974,0.12158,0.05,32,camera,camera
+797,bed,0.0451309,0.32807,0.373201,0.0180676,0.05,2,camera,camera
+5449,desk,0.0873096,0.219718,0.307027,0.0497362,0.05,14,camera,camera
+6624,sofa,0.11156,0.120406,0.231966,0.136144,0.05,18,camera,camera
