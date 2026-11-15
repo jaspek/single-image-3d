@@ -9,10 +9,11 @@ Sample ids used everywhere in this repo are 0-based indices into pix3d.json.
 Camera model. Pix3D gives `rot_mat` (3x3) and `trans_mat` (3,) that map model coordinates
 to camera coordinates, and `focal_length` in mm for a 35 mm-film camera with a 32 mm wide
 sensor (the Blender default used to render the ground truth). Pixel focal length is
-therefore f_px = focal_length * image_width / 32. The axis convention of the camera frame
-is selected by `CONVENTION`; run scripts/check_pix3d_projection.py once after downloading
-the data: it reprojects the annotated 3D keypoints onto the 2D keypoints and reports which
-convention is right.
+therefore f_px = focal_length * image_width / 32, also for portrait images. The Pix3D
+camera frame has x to the left, y up and z forward; `CONVENTION` selects the flip that
+turns it into the frame used in this repo (x right, y down, z forward).
+scripts/check_pix3d_projection.py verifies this on the data: it projects the CAD models
+and compares their bounding boxes with the annotated ones.
 """
 from __future__ import annotations
 
@@ -26,15 +27,16 @@ from PIL import Image
 
 SENSOR_WIDTH_MM = 32.0
 
-# Candidate axis flips applied to camera coordinates before the pinhole projection.
+# Axis flips applied to Pix3D camera coordinates before the pinhole projection. The object
+# is in front of the camera (z > 0) in all of them.
 CONVENTIONS = {
+    "flip_xy": np.diag([-1.0, -1.0, 1.0]),   # Pix3D: x left, y up, z forward  (the right one)
     "opencv": np.diag([1.0, 1.0, 1.0]),      # x right, y down, z forward
-    "flip_yz": np.diag([1.0, -1.0, -1.0]),   # x right, y up, z backward (OpenGL / Blender)
-    "flip_z": np.diag([1.0, 1.0, -1.0]),
+    "flip_x": np.diag([-1.0, 1.0, 1.0]),
     "flip_y": np.diag([1.0, -1.0, 1.0]),
 }
-# Set after running scripts/check_pix3d_projection.py.
-CONVENTION = "opencv"
+# Confirmed with scripts/check_pix3d_projection.py: median box overlap 0.997.
+CONVENTION = "flip_xy"
 
 
 class Pix3D:

@@ -23,7 +23,7 @@ down, the labeled subset is mirrored on Hugging Face (search "nyu_depth_v2"), bu
 Unzip so that `data/pix3d/pix3d.json`, `data/pix3d/img/`, `data/pix3d/mask/` and
 `data/pix3d/model/` exist. 10 069 images, 395 CAD models, 9 categories, with mask, pose,
 focal length and keypoints per image. After unzipping run
-`python scripts/check_pix3d_projection.py` once and set the camera convention it reports.
+`python scripts/check_pix3d_projection.py` once; it should end with "loader and data agree".
 
 ## Then
 
