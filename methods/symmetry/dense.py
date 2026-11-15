@@ -256,7 +256,7 @@ class _Scanner:
 def epipolar_scan(gray: np.ndarray, mask: np.ndarray, K: np.ndarray, n: np.ndarray,
                   step: int = 3, dt: float = 1.5, half: int = 2, spacing: float = 3.0,
                   normals: np.ndarray | None = None, min_ncc: float = 0.8,
-                  uniqueness: float = 0.8, min_std: float = 0.02, min_along: float = 0.2,
+                  uniqueness: float = 0.8, min_std: float = 0.02, min_along: float = 0.05,
                   min_shift: float = 4.0,
                   reciprocal: float | None = 2.5, mirror_margin: float | None = 0.05,
                   verify_ncc: float | None = 0.7, despeckle: bool = True, match: bool = True,

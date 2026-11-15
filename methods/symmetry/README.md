@@ -78,10 +78,10 @@ object size, camera alignment). Plane and shape are known here.
 
 | object | azimuth | plane error | accuracy | completeness | F-score | hull F-score |
 |---|---|---|---|---|---|---|
-| chair | 15 / 30 / 45 / 60 deg | 0.0 / 1.4 / 0.1 / 1.2 deg | 0.005 / 0.007 / 0.009 / 0.007 | 0.031 / 0.034 / 0.050 / 0.047 | 0.91 / 0.88 / 0.79 / 0.84 | 0.44 / 0.45 / 0.57 / 0.61 |
-| table | 15 / 30 deg | 0.1 / 2.2 deg | 0.015 / 0.088 | 0.051 / 0.047 | 0.89 / 0.77 | 0.36 / 0.40 |
+| chair | 15 / 30 / 45 / 60 deg | 0.0 / 1.4 / 0.1 / 1.2 deg | 0.007 / 0.009 / 0.007 / 0.007 | 0.023 / 0.025 / 0.038 / 0.046 | 0.98 / 0.96 / 0.92 / 0.85 | 0.44 / 0.45 / 0.57 / 0.62 |
+| table | 15 / 30 deg | 0.1 / 2.2 deg | 0.008 / 0.033 | 0.048 / 0.029 | 0.91 / 0.90 | 0.36 / 0.41 |
 | table | 45 / 60 deg | no plane accepted | | | | |
-| cabinet | 15 / 30 / 45 deg | 0.0 / 0.0 / 0.5 deg | 0.006 / 0.006 / 0.006 | 0.110 / 0.077 / 0.051 | 0.55 / 0.58 / 0.66 | 0.43 / 0.41 / 0.47 |
+| cabinet | 15 / 30 / 45 deg | 0.0 / 0.0 / 0.5 deg | 0.006 / 0.006 / 0.006 | 0.109 / 0.074 / 0.049 | 0.55 / 0.59 / 0.67 | 0.43 / 0.41 / 0.47 |
 | cabinet | 60 deg | no plane accepted | | | | |
 
 Pix3D subset, 50 photos, 38 of them with a mirror-symmetric CAD model. Parameters were set
