@@ -10,5 +10,12 @@ Commit the CSVs and the summaries. Prediction files under `outputs/` are not com
 
 Depth metrics (NYU protocol): AbsRel, SqRel, RMSE, RMSE log, log10, delta < 1.25 / 1.25^2 /
 1.25^3; optional normal errors (mean / median angle, % below 11.25, 22.5, 30 degrees).
-Shape metrics (unit object size): accuracy (pred -> gt), completeness (gt -> pred), Chamfer
-(sum of both), F-score at tau.
+Shape metrics (in units of the bounding-box diagonal of the ground-truth model): accuracy
+(pred -> gt), completeness (gt -> pred), Chamfer (sum of both), F-score at tau. The `align`
+column says how the prediction was aligned first: `icp` = similarity transform with rotation
+search, `camera` = one scale factor about the camera centre (prediction in the camera
+frame), `none`. Numbers with different `align` are not directly comparable. The `n` column
+of the summary counts the images that have a prediction.
+
+- `symmetry_status.csv`: one row per image for the symmetry method (status, number of
+  matches, view angle), including the images where no symmetry plane was found.

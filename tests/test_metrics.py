@@ -6,6 +6,7 @@ from si3d import io
 from si3d.eval import (align_pred, chamfer, depth_metrics, eval_mask, evaluate_shape,
                        normal_metrics, normals_from_depth, normalize_points)
 from si3d.eval.depth import METRIC_NAMES
+from si3d.eval.shape import as_points, camera_scale, icp_align
 
 K = np.array([[500.0, 0, 320.0], [0, 500.0, 240.0], [0, 0, 1.0]])
 
@@ -105,6 +106,54 @@ def test_evaluate_shape_recovers_rigid_transform():
     assert m["fscore"] > 0.95
     m_none = evaluate_shape(moved, mesh, n=3000, tau=0.05, align="none")
     assert m_none["chamfer"] > m["chamfer"]
+
+
+def _seat_and_back() -> trimesh.Trimesh:
+    back = trimesh.transformations.translation_matrix([0.0, 0.28, 0.22])
+    return trimesh.util.concatenate([trimesh.creation.box(extents=[0.5, 0.06, 0.5]),
+                                     trimesh.creation.box(extents=[0.5, 0.5, 0.06], transform=back)])
+
+
+def test_icp_finds_the_rotation():
+    mesh = _seat_and_back()
+    turned = mesh.copy()
+    turned.apply_transform(trimesh.transformations.rotation_matrix(np.radians(100), [0.2, 1.0, 0.1]))
+    turned.apply_scale(0.3)
+    m = evaluate_shape(turned, mesh, n=4000)
+    assert m["chamfer"] < 0.03 and m["fscore"] > 0.95
+
+
+def test_icp_does_not_shrink_a_larger_shape():
+    """With prediction -> ground truth distances only, a free scale lets the prediction
+    collapse onto a part of the ground truth. The convex hull is larger than the shape."""
+    mesh = _seat_and_back()
+    g, _ = normalize_points(as_points(mesh, 4000, 0))
+    p, _ = normalize_points(as_points(mesh.convex_hull, 4000, 1))
+    _, M, _ = icp_align(p, g)
+    assert 0.85 < np.cbrt(np.linalg.det(M[:3, :3])) < 1.2
+
+
+def test_stray_points_do_not_break_the_alignment():
+    mesh = _seat_and_back()
+    pts = as_points(mesh, 6000, 1)
+    clean = evaluate_shape(pts, mesh, n=6000)
+    pts[:15] += [0.0, 0.0, 8.0]                 # 0.25 % gross outliers
+    m = evaluate_shape(pts, mesh, n=6000)
+    assert m["fscore"] > 0.95
+    assert m["accuracy"] > clean["accuracy"] + 0.005   # they still count in the distance
+
+
+def test_camera_alignment_recovers_the_scale_only():
+    mesh = _seat_and_back()
+    mesh.apply_translation([0.1, -0.05, 3.0])   # in front of a camera at the origin
+    pts = as_points(mesh, 5000, 1)
+    _, s = camera_scale(pts / 3.7, as_points(mesh, 5000, 0))
+    assert s == pytest.approx(3.7, rel=0.01)
+    m = evaluate_shape(pts / 3.7, mesh, n=5000, align="camera")
+    assert m["chamfer"] < 0.03 and m["fscore"] > 0.97
+    # a wrong position stays wrong: the same cloud moved sideways scores worse
+    moved = evaluate_shape(pts / 3.7 + [0.05, 0.0, 0.0], mesh, n=5000, align="camera")
+    assert moved["chamfer"] > 2 * m["chamfer"]
 
 
 def test_io_roundtrip(tmp_path, monkeypatch):

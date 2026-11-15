@@ -54,8 +54,10 @@ depth is fine, say so in the method README and evaluate with `--align affine`.
 - Ids are 0-based indices into `nyu_depth_v2_labeled.mat` and `pix3d.json`.
 - Depth in metres, (480, 640) float32 for NYU. Camera frame: x right, y down, z forward.
 - NYU evaluation uses the Eigen crop and ground truth between 0.001 m and 10 m.
-- Pix3D shapes are normalised to unit bounding-box diagonal before comparison; distances are
-  in units of object size. `--gt-frame camera` for methods that reconstruct in the camera frame.
+- Pix3D distances are in units of the bounding-box diagonal of the ground-truth model. A
+  prediction is aligned first: `--align icp` (similarity transform with rotation search) for
+  methods with their own output frame, `--align camera` (one scale factor, nothing else) for
+  methods that reconstruct in the camera frame.
 - One method name = one folder under `outputs/` = one row in the summary table. A variant
   (fine-tuned, different resolution) is a new method name, e.g. `depth_anything_v2_nyuft`.
 
