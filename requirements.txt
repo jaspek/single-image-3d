@@ -1,0 +1,24 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# PyTorch (CPU-Version)
+#torch
+#torchvision
+
+# Kernbibliotheken für 3D, Mathematik und Rendering
+#numpy
+#scipy
+#trimesh
+#Pillow
+#pyrender
+#matplotlib
+
+# Spezifische Abhängigkeiten für das TripoSR Modell
+#omegaconf==2.3.0
+#einops==0.7.0
+#transformers
+#huggingface-hub
+#rembg
+#imageio
+
+# TorchMCubes (wird für die 3D-Gitter-Extraktion benötigt)
+git+https://github.com/tatsy/torchmcubes.git
