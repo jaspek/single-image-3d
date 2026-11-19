@@ -10,7 +10,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import h5py
+try:
+    import h5py
+except ImportError:
+    h5py = None  # type: ignore
 import numpy as np
 import scipy.io
 

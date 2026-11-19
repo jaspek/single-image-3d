@@ -3,6 +3,8 @@ data/*
 !data/README.md
 # method outputs (predictions, visualisations) and model weights
 outputs/
+TripoSR/tsr/
+TripoSR/outputs/
 checkpoints/
 *.pth
 *.ckpt

@@ -1,6 +1,6 @@
-# TripoSR Evaluation on Pix3D
+# TripoSR Evaluation on Pix3D (Multi-Category Benchmark)
 
-Dieses Verzeichnis bündelt alle Skripte, Auswertungen und generierten Daten der **TripoSR-Evaluation** auf dem **Pix3D-Datensatz** (Kategorie `chair`, 50 Samples).
+Dieses Verzeichnis bündelt alle Skripte, Auswertungen und generierten Daten der **TripoSR-Evaluation** auf dem **Pix3D-Datensatz** über alle 9 Objekt-Kategorien / Formen (`bed`, `bookcase`, `chair`, `desk`, `misc`, `sofa`, `table`, `tool`, `wardrobe`).
 
 ---
 
@@ -8,16 +8,17 @@ Dieses Verzeichnis bündelt alle Skripte, Auswertungen und generierten Daten der
 
 ```text
 single-image-3d/TripoSR/
-├── eval_pipeline.py        # Haupt-Evaluierungspipeline (Inferenz, ICP-Alignment & Chamfer Distance)
-├── calc_fscore.py          # Skript zur Berechnung der 3D F-Scores (Precision, Recall, F1@tau)
-├── evaluation_report.md    # Umfassender Evaluierungsbericht mit Detailanalyse
-├── README.md               # Diese Dokumentation
-└── outputs/                # Generierte Daten (von Git ignoriert)
-    ├── inputs/             # Maskierte & vorverarbeitete 2D-Eingabebilder (<id>_input.png)
-    ├── meshes/             # Generierte 3D-Meshes von TripoSR (<id>_pred.obj)
-    ├── renders/            # 2D-Vorschau-Renderings der 3D-Meshes (<id>_render.png)
-    ├── results.csv         # Tabellarische Auswertung aller 50 Samples
-    └── results.json        # Zusammenfassung & Chamfer-Distance-Statistiken
+├── eval_pipeline.py                 # Multi-Category Benchmark-Pipeline (Inferenz, ICP & CD/F1-Scores)
+├── calc_fscore.py                   # 3D F-Score Analyse-Tool (Precision, Recall, F1@tau über alle Kategorien)
+├── evaluation_report.md             # Ursprünglicher Bericht (Kategorie: chair, 50 Samples)
+├── evaluation_report_all_shapes.md  # Umfassender Vergleichsbericht aller 9 Pix3D-Kategorien
+├── README.md                        # Diese Dokumentation
+└── outputs/                         # Generierte Artefakte (von Git ignoriert)
+    ├── inputs/                      # Maskierte & vorverarbeitete 2D-Eingabebilder (<id>_input.png)
+    ├── meshes/                      # Generierte 3D-Meshes von TripoSR (<id>_pred.obj)
+    ├── renders/                     # 2D-Vorschau-Renderings der 3D-Meshes (<id>_render.png)
+    ├── results.csv                  # Detaillierte tabellarische Auswertung aller Samples
+    └── results.json                 # Zusammenfassung mit kategorieweisen & globalen Metriken
 ```
 
 ---
@@ -26,32 +27,35 @@ single-image-3d/TripoSR/
 
 Die Skripte können sowohl aus dem Hauptverzeichnis `single-image-3d` als auch direkt aus diesem Ordner gestartet werden:
 
-### 1. Chamfer-Distance-Pipeline ausführen
+### 1. Benchmark über alle Kategorien ausführen
 
 ```powershell
-# Vollständiger Durchlauf (50 Stühle)
-python TripoSR/eval_pipeline.py
+# Vollständiger Multi-Category Benchmark (alle 9 Formen, z. B. 10 Samples pro Form)
+python TripoSR/eval_pipeline.py --category all --num-samples 10
 
-# Schneller Testlauf mit 1 oder 5 Samples
-python TripoSR/eval_pipeline.py --num-samples 1
+# Einzelne Kategorie evaluieren (z. B. chair, sofa, bed, table etc.)
+python TripoSR/eval_pipeline.py --category chair --num-samples 50
 
-# Nur Evaluierung der existierenden Meshes (ohne erneute Inferenz)
+# Nur Evaluierung bereits generierter Meshes (überspringt Inferenz)
 python TripoSR/eval_pipeline.py --eval-only
 ```
 
-### 2. 3D F-Scores berechnen
+### 2. 3D F-Scores analysieren & vergleichen
 
 ```powershell
+# Liest results.json und gibt tabellarischen F-Score-Vergleich über alle Kategorien aus
 python TripoSR/calc_fscore.py
+
+# Optional: Neuberechnung direkt aus den .obj-Meshes erzwingen
+python TripoSR/calc_fscore.py --recompute
 ```
 
 ---
 
-## 📊 Benchmark-Ergebnisse (50 Pix3D-Stühle)
+## 📊 Metriken & Auswertungs-Details
 
-* **Mean Chamfer Distance:** `0.2180` (Median: `0.2256`)
-* **Bester Einzelwert (CD):** `0.0320` (Sample `#1492`)
-* **Mean F-Score @ 5 % ($\tau = 0.05$):** `34.31 %` (Precision: `90.74 %`, Recall: `24.00 %`)
-* **Mean F-Score @ 10 % ($\tau = 0.10$):** `49.39 %` (Precision: `99.28 %`, Recall: `35.21 %`)
-
-Details und Fehlerursachenanalysen finden sich in `evaluation_report.md`.
+* **Symmetric Chamfer Distance (CD):** Nach Bounding-Box-Zentrierung, Einheits-Skalierung und Multi-Start ICP.
+* **3D F-Score nach Tatarchenko et al. (CVPR 2019):**
+  * **Precision@$\tau$:** Prozentsatz vorhergesagter Oberflächenpunkte innerhalb von Distanz $\tau$ zur CAD-Referenz.
+  * **Recall@$\tau$:** Prozentsatz der Ground-Truth-CAD-Punkte innerhalb von Distanz $\tau$ zur Rekonstruktion.
+  * **$F_1$-Score@$\tau$:** Harmonisches Mittel $2 \cdot \frac{P \cdot R}{P + R}$ für Schwellenwerte $\tau \in \{0.01, 0.02, 0.05, 0.10, 0.20\}$.
