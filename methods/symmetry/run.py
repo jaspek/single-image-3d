@@ -3,6 +3,11 @@
     python methods/symmetry/run.py                       # every id in configs/subset_pix3d.txt
     python methods/symmetry/run.py --ids 12 345 --vis    # selected images, with debug pictures
     python methods/symmetry/run.py --demo                # rendered test objects, no data needed
+    python methods/symmetry/run.py --demo --demo-plain   # the same objects without texture
+
+The normal of the symmetry plane comes from the straight edges of the object (--plane-from
+lines, the default on Pix3D), from mirrored feature pairs (features), or from the edges
+with the feature pairs as a fallback (auto, the default of --demo).
 
 Writes
     outputs/symmetry/pix3d/<id>.npy         matched points and their mirror copies
@@ -31,7 +36,9 @@ sys.path.insert(0, str(ROOT))
 from methods.symmetry.pipeline import Params, Result, reconstruct  # noqa: E402
 from si3d import io  # noqa: E402
 
-STATUS_COLUMNS = ["id", "category", "status", "n_keypoints", "n_matches", "n_inliers", "support",
+STATUS_COLUMNS = ["id", "category", "status", "plane_source", "line_reject", "n_segments", "frame_lines",
+                  "frame_explained", "normal_sigma_deg", "n_planes", "coverage_depth", "coverage_up",
+                  "n_keypoints", "n_matches", "n_inliers", "support",
                   "support_firm", "chance", "n_guided", "dense_ratio", "dense_null", "n_normals", "n_sparse",
                   "n_dense", "n_points", "n_hull", "view_angle_deg", "nx", "ny", "nz", "seconds"]
 
@@ -107,24 +114,30 @@ def run_dataset(a: argparse.Namespace, params: Params) -> None:
 
 
 def run_demo(a: argparse.Namespace, params: Params) -> None:
-    """Rendered objects with a known symmetry plane and shape."""
+    """Rendered objects with a known symmetry plane and shape. The error of the normal is
+    measured to the nearest symmetry plane of the object (the table has two, the cabinet three)."""
     from methods.symmetry import synthetic
+    from methods.symmetry.truth import model_symmetry
     from si3d.eval import evaluate_shape
-    print(f"{'object':8s} {'azimuth':>7s} {'status':12s} {'normal err':>10s} {'accuracy':>9s} "
-          f"{'complet.':>9s} {'F-score':>8s} {'hull F':>7s}")
+    print(f"{'object':8s} {'azimuth':>7s} {'status':12s} {'plane from':10s} {'normal err':>10s} {'accuracy':>9s} "
+          f"{'complet.':>9s} {'F-score':>8s} {'hull F':>7s} {'planes':>7s}")
     for name in a.demo_objects:
+        axes = [axis for axis, _ in model_symmetry(synthetic.OBJECTS[name]())]
         for az in a.demo_azimuths:
-            r = synthetic.make(name, azimuth=az)
+            r = synthetic.make(name, azimuth=az, plain=a.demo_plain)
             res = reconstruct(r.image, r.mask, r.K, params)
             line = f"{name:8s} {az:7.0f} {res.status:12s}"
             if res.status == "ok":
-                n_true, _ = r.plane
-                err = np.degrees(np.arccos(min(1.0, abs(float(res.normal @ n_true)))))
+                err = min(np.degrees(np.arccos(min(1.0, abs(float(res.normal @ r.R @ axis))))) for axis in axes)
                 gt = r.mesh_in_camera()
-                m = evaluate_shape(res.points, gt, align="camera")
-                line += f" {err:8.2f} deg {m['accuracy']:9.4f} {m['completeness']:9.4f} {m['fscore']:8.3f}"
+                line += f" {res.info.get('plane_source', ''):10s} {err:6.2f} deg"
+                if len(res.points):
+                    m = evaluate_shape(res.points, gt, align="camera")
+                    line += f" {m['accuracy']:9.4f} {m['completeness']:9.4f} {m['fscore']:8.3f}"
+                else:
+                    line += f" {'-':>9s} {'-':>9s} {'-':>8s}"
                 if len(res.hull):
-                    line += f" {evaluate_shape(res.hull, gt, align='camera')['fscore']:7.3f}"
+                    line += f" {evaluate_shape(res.hull, gt, align='camera')['fscore']:7.3f} {res.info['n_planes']:7d}"
             print(line)
             if a.vis:
                 save_figure(res, io.OUTPUTS / a.name / "vis" / f"demo_{name}_{az:.0f}.png",
@@ -144,6 +157,11 @@ def main() -> None:
     ap.add_argument("--demo", action="store_true", help="run on rendered test objects")
     ap.add_argument("--demo-objects", nargs="*", default=["chair", "table", "cabinet"])
     ap.add_argument("--demo-azimuths", type=float, nargs="*", default=[15.0, 30.0, 45.0])
+    ap.add_argument("--demo-plain", action="store_true",
+                    help="render the test objects without texture: only shaded faces and the outline")
+    ap.add_argument("--plane-from", choices=["lines", "features", "auto"], default=None,
+                    help="source of the plane normal: straight edges, mirrored feature pairs, or edges "
+                         "with the feature pairs as fallback (default: lines for Pix3D, auto for --demo)")
     ap.add_argument("--dense", action=argparse.BooleanOptionalAction, default=None,
                     help="dense search along the epipolar lines (default: on for --demo, off for "
                          "Pix3D, where most of its matches are wrong)")
@@ -151,6 +169,8 @@ def main() -> None:
                     help="analysis: take the symmetry plane from the CAD model and the annotated "
                          "pose instead of detecting it (use with --name)")
     ap.add_argument("--no-hull", action="store_true", help="skip the silhouette intersection")
+    ap.add_argument("--no-more-planes", action="store_true",
+                    help="do not test the other axes of the edge frame as further symmetry planes")
     kinds = {"int": int, "float": float}
     for f in fields(Params):                                # every numeric parameter as a flag
         if f.type in kinds:
@@ -158,7 +178,9 @@ def main() -> None:
     a = ap.parse_args()
     numeric = {f.name: getattr(a, f.name) for f in fields(Params) if f.type in kinds}
     dense = a.demo if a.dense is None else a.dense
-    params = Params(**numeric, dense=dense, hull=not a.no_hull)
+    plane_from = a.plane_from or ("auto" if a.demo else "lines")
+    params = Params(**numeric, plane_from=plane_from, dense=dense, hull=not a.no_hull,
+                    more_planes=not a.no_more_planes)
     (run_demo if a.demo else run_dataset)(a, params)
 
 

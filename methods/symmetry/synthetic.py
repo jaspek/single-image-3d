@@ -70,6 +70,21 @@ class SymmetricTexture:
         return lum[:, None] * (0.7 + 0.3 * tint)
 
 
+class PlainSurface:
+    """One colour everywhere: an object without texture, like painted or laminated furniture.
+    Only the shading of the faces and the outline remain in the image."""
+
+    def __init__(self, albedo: float = 0.8):
+        self.albedo = albedo
+
+    def __call__(self, P: np.ndarray) -> np.ndarray:
+        return np.full((len(P), 3), self.albedo)
+
+
+LIGHT = (0.35, -0.45, 1.0)            # direction the light travels, camera frame
+LIGHT_PLAIN = (0.5, 0.7, 0.5)         # from the upper left front: top, front and side differ in brightness
+
+
 def pose(azimuth_deg: float, elevation_deg: float = 20.0, distance: float = 2.5,
          shift=(0.0, 0.0)) -> tuple[np.ndarray, np.ndarray]:
     """Object-to-camera rotation and translation: X_cam = R X_obj + t."""
@@ -138,8 +153,10 @@ def _rasterise(V_obj: np.ndarray, V_cam: np.ndarray, faces: np.ndarray, K: np.nd
 
 def render(mesh: trimesh.Trimesh, K: np.ndarray, R: np.ndarray, t: np.ndarray,
            size: tuple[int, int] = (480, 640), texture: SymmetricTexture | None = None,
-           ambient: float = 0.75, background: str = "flat", seed: int = 0, ss: int = 2) -> Render:
-    """Render with `ss` x supersampling. background: 'flat' or 'clutter' (asymmetric noise)."""
+           ambient: float = 0.75, background: str = "flat", seed: int = 0, ss: int = 2,
+           light=LIGHT) -> Render:
+    """Render with `ss` x supersampling. background: 'flat' or 'clutter' (asymmetric noise).
+    `texture` maps object coordinates to colours; `light` is the direction the light travels."""
     H, W = size
     texture = texture or SymmetricTexture(seed)
     S = np.diag([ss, ss, 1.0])
@@ -150,8 +167,8 @@ def render(mesh: trimesh.Trimesh, K: np.ndarray, R: np.ndarray, t: np.ndarray,
 
     color = np.zeros((H * ss, W * ss, 3))
     normals = np.asarray(mesh.face_normals) @ R.T
-    light = np.array([0.35, -0.45, 1.0])
-    light /= np.linalg.norm(light)                               # direction the light travels
+    light = np.asarray(light, dtype=np.float64)
+    light = light / np.linalg.norm(light)
     shade = ambient + (1.0 - ambient) * np.clip(-(normals @ light), 0.0, 1.0)
     color[hit] = texture(pos[hit]) * shade[fid[hit]][:, None]
     rng = np.random.default_rng(seed + 1)
@@ -175,10 +192,14 @@ def render(mesh: trimesh.Trimesh, K: np.ndarray, R: np.ndarray, t: np.ndarray,
 
 
 def make(name: str = "chair", azimuth: float = 25.0, elevation: float = 20.0, distance: float = 2.5,
-         size: tuple[int, int] = (480, 640), focal: float | None = None, seed: int = 0, **kw) -> Render:
-    """Render one of the test objects. Intrinsics follow Pix3D: principal point in the centre."""
+         size: tuple[int, int] = (480, 640), focal: float | None = None, seed: int = 0,
+         plain: bool = False, **kw) -> Render:
+    """Render one of the test objects. Intrinsics follow Pix3D: principal point in the centre.
+    plain=True renders it without texture, with stronger shading (PlainSurface)."""
     H, W = size
     f = focal or 1.1 * W
     K = np.array([[f, 0.0, W / 2.0], [0.0, f, H / 2.0], [0.0, 0.0, 1.0]])
     R, t = pose(azimuth, elevation, distance)
+    if plain:
+        kw = {"texture": PlainSurface(), "ambient": 0.45, "light": LIGHT_PLAIN, **kw}
     return render(OBJECTS[name](), K, R, t, size=size, seed=seed, **kw)

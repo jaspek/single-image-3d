@@ -1,5 +1,5 @@
-"""Debug picture of one reconstruction: matches, depth of the dense matches, two views of
-the point cloud."""
+"""Debug picture of one reconstruction: matches and straight edges, depth of the dense
+matches, two views of the point cloud."""
 from __future__ import annotations
 
 import matplotlib
@@ -20,10 +20,15 @@ def figure(res: Result, title: str = "") -> plt.Figure:
     dbg = res.debug
     fig, axes = plt.subplots(1, 4, figsize=(17, 4.6))
     info = res.info
-    fig.suptitle(f"{title}  status={res.status}  keypoints={info.get('n_keypoints', 0)}  "
-                 f"matches={info.get('n_matches', 0)}  inliers={info.get('n_inliers', 0)}  "
-                 f"lines={info.get('support', 0)} (chance {info.get('chance', 0)})  "
-                 f"view angle={info.get('view_angle_deg', '-')} deg", fontsize=10)
+    head = f"{title}  status={res.status}  plane from {info.get('plane_source', '-')}"
+    if "n_segments" in info:
+        head += (f"  edges={info['n_segments']} (explained {info.get('frame_explained', 0)}, on the normal "
+                 f"{info.get('frame_lines', 0)}, sigma {info.get('normal_sigma_deg', '-')} deg"
+                 f"{', refused: ' + info['line_reject'] if info.get('line_reject') else ''})")
+    if info.get("plane_source") != "lines":
+        head += (f"  matches={info.get('n_matches', 0)}  inliers={info.get('n_inliers', 0)}  "
+                 f"lines={info.get('support', 0)} (chance {info.get('chance', 0)})")
+    fig.suptitle(f"{head}  view angle={info.get('view_angle_deg', '-')} deg", fontsize=10)
     for ax in axes[:2]:
         ax.axis("off")
     if "gray" not in dbg:
@@ -32,10 +37,23 @@ def figure(res: Result, title: str = "") -> plt.Figure:
 
     ax = axes[0]
     ax.imshow(gray, cmap="gray", vmin=0, vmax=1)
-    ax.set_title("mirror matches (green: used, red: rejected)", fontsize=9)
     used = dbg.get("used")
-    for i, j in pairs[~dbg["inliers"]]:
-        ax.plot(f.xy[[i, j], 0], f.xy[[i, j], 1], color="tab:red", lw=0.4, alpha=0.6)
+    lp = dbg.get("lines")
+    if lp is not None and lp.frame is not None:
+        # straight edges: orange point to the normal, blue to the vertical, cyan to the third
+        # axis, grey to none of the three
+        ax.set_title("straight edges by axis (orange: normal), mirror matches (green)", fontsize=9)
+        seg, colors = lp.segments, {lp.axis: "orange", lp.up: "royalblue"}
+        for s_ in np.nonzero(~lp.frame.inliers.any(axis=0))[0]:
+            ax.plot([seg.a[s_, 0], seg.b[s_, 0]], [seg.a[s_, 1], seg.b[s_, 1]], color="0.6", lw=0.6)
+        for k in range(3):
+            for s_ in np.nonzero(lp.frame.inliers[k])[0]:
+                ax.plot([seg.a[s_, 0], seg.b[s_, 0]], [seg.a[s_, 1], seg.b[s_, 1]],
+                        color=colors.get(k, "cyan"), lw=1.3)
+    else:
+        ax.set_title("mirror matches (green: used, red: rejected)", fontsize=9)
+        for i, j in pairs[~dbg["inliers"]]:
+            ax.plot(f.xy[[i, j], 0], f.xy[[i, j], 1], color="tab:red", lw=0.4, alpha=0.6)
     if used is not None:
         for i, j in used:
             ax.plot(f.xy[[i, j], 0], f.xy[[i, j], 1], color="lime", lw=0.7)
