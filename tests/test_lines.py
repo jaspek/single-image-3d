@@ -140,8 +140,7 @@ def test_uncertainty_grows_when_the_perspective_is_weak():
         Ks[0, 0] = Ks[1, 1] = 700.0 * scale
         seg, _ = box_segments(azimuth=30.0, counts=(4, 4, 0), K=Ks, distance=3.0 * scale)
         frame = lines.fit_frame(Ks, seg, lines.vanishing_directions(Ks, seg, min_lines=3))
-        tol = lines.tolerance(seg.length, 1.5, 1.0)
-        sigma.append(lines.frame_uncertainty(Ks, frame.axes, seg, frame.inliers, tol).max())
+        sigma.append(lines.frame_uncertainty(Ks, frame.axes, seg, frame.inliers).max())
     assert sigma[1] > 4.0 * sigma[0]
 
 
@@ -169,7 +168,7 @@ def test_features_find_no_plane_on_an_untextured_object(plain_chair):
 
 
 def test_edges_refuse_a_textured_object_and_features_take_over():
-    r = synthetic.make("chair", azimuth=30.0)
+    r = synthetic.make("cabinet", azimuth=30.0)
     res = reconstruct(r.image, r.mask, r.K, Params(plane_from="lines", dense=False))
     assert res.status == "no_symmetry" and res.info["line_reject"] == "not_box"
     res = reconstruct(r.image, r.mask, r.K, Params(plane_from="auto", dense=False))
@@ -177,7 +176,13 @@ def test_edges_refuse_a_textured_object_and_features_take_over():
     assert angle_deg(res.normal, r.plane[0]) < 3.0
 
 
+def test_front_and_side_cannot_be_told_apart_at_45_degrees():
+    r = synthetic.make("chair", azimuth=45.0, plain=True)
+    res = reconstruct(r.image, r.mask, r.K, Params(plane_from="lines", dense=False))
+    assert res.status == "no_symmetry" and res.info["line_reject"] == "ambiguous"
+
+
 def test_round_object_has_no_plane_from_edges():
     img = disc_image(80.0)
-    out = lines.plane_normal(img, None, K, size=160.0)
+    out = lines.plane_normal(img, None, K, np.array([0.0, 0.0, 1.0]), size=160.0)
     assert out.normal is None and out.reason in ("no_lines", "not_box")

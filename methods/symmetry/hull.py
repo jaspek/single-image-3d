@@ -15,12 +15,42 @@ a part of the silhouette is left without one. The position is found with this te
 the plane is used only if (nearly) the whole silhouette stays covered. A plane that passes
 the test cannot make the result contradict the image.
 
+The edge frame gives one more bound without any symmetry: the object lies inside the box
+whose faces are perpendicular to the three axes and touch its outline (fit_box). Cones
+leave a wedge over every flat face and stay open along the symmetry plane; the box cuts
+both off.
+
 Camera frame of geometry.py; a plane is a pair (n, d) for n . X = d.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 from scipy import ndimage as ndi
+from scipy.spatial import ConvexHull
+
+
+@dataclass
+class Box:
+    """lo <= axes @ X <= hi, one row of `axes` per face normal."""
+    axes: np.ndarray         # (3, 3) orthonormal rows
+    lo: np.ndarray           # (3,)
+    hi: np.ndarray           # (3,)
+    misfit: float = 0.0      # 0 if the six tangents of the outline agree on one box
+
+    def contains(self, X: np.ndarray, margin: float = 0.0) -> np.ndarray:
+        c = X @ self.axes.T
+        return ((c >= self.lo - margin) & (c <= self.hi + margin)).all(axis=1)
+
+    def corners(self) -> np.ndarray:
+        """The eight corners, (8, 3)."""
+        c = np.array([[(self.lo, self.hi)[(i >> k) & 1][k] for k in range(3)] for i in range(8)])
+        return c @ self.axes
+
+    @property
+    def diagonal(self) -> float:
+        return float(np.linalg.norm(self.hi - self.lo))
 
 
 def reflections(planes) -> list[tuple[np.ndarray, np.ndarray]]:
@@ -70,21 +100,27 @@ def depth_samples(z_lo: float, z_hi: float, count: int) -> np.ndarray:
 
 
 def occupancy(mask: np.ndarray, K: np.ndarray, maps, rays: np.ndarray, depths: np.ndarray,
-              chunk: int = 1500) -> np.ndarray:
-    """(P, Z) bool: the point at depth z on ray p lies in the intersection of the cones."""
+              chunk: int = 1500, box: Box | None = None) -> np.ndarray:
+    """(P, Z) bool: the point at depth z on ray p lies in the intersection of the cones,
+    and inside the box if one is given."""
     out = np.zeros((len(rays), len(depths)), bool)
     for lo in range(0, len(rays), chunk):
         r = rays[lo:lo + chunk]
         X = (r[:, None, :] * depths[None, :, None]).reshape(-1, 3)
-        out[lo:lo + chunk] = in_all_views(mask, K, maps, X).reshape(len(r), len(depths))
+        inside = in_all_views(mask, K, maps, X)
+        if box is not None:
+            inside &= box.contains(X)
+        out[lo:lo + chunk] = inside.reshape(len(r), len(depths))
     return out
 
 
 def surface(mask: np.ndarray, K: np.ndarray, planes, z_lo: float, z_hi: float, max_pixels: int = 12000,
-            n_depth: int = 192, refine: int = 6, tolerance_px: int = 0) -> tuple[np.ndarray, float]:
+            n_depth: int = 192, refine: int = 6, tolerance_px: int = 0,
+            box: Box | None = None) -> tuple[np.ndarray, float]:
     """Surface points of the intersection of the silhouette cones of the camera and of all
     its mirror images at `planes`, with their own mirror images, and the share of the
-    silhouette pixels that see a point of the intersection.
+    silhouette pixels that see a point of the intersection. With `box` the intersection is
+    cut down to the box, which should be symmetric about the planes.
 
     Along every viewing ray the depths at which the ray enters or leaves the intersection
     are located (sampling, then `refine` bisections). `tolerance_px` widens the silhouette
@@ -93,7 +129,7 @@ def surface(mask: np.ndarray, K: np.ndarray, planes, z_lo: float, z_hi: float, m
     wide = ndi.binary_dilation(mask, iterations=tolerance_px) if tolerance_px > 0 else mask
     rays = grid_rays(mask, K, max_pixels)
     depths = depth_samples(z_lo, z_hi, n_depth)
-    occ = occupancy(wide, K, maps, rays, depths)
+    occ = occupancy(wide, K, maps, rays, depths, box=box)
     b, k = np.nonzero(occ[:, 1:] != occ[:, :-1])
     if len(b) == 0:
         return np.zeros((0, 3)), float(occ.any(axis=1).mean()) if len(rays) else 0.0
@@ -101,6 +137,8 @@ def surface(mask: np.ndarray, K: np.ndarray, planes, z_lo: float, z_hi: float, m
     for _ in range(refine):
         mid = np.sqrt(inside * outside)
         hit = in_all_views(wide, K, maps, rays[b] * mid[:, None])
+        if box is not None:
+            hit &= box.contains(rays[b] * mid[:, None])
         inside, outside = np.where(hit, mid, inside), np.where(hit, outside, mid)
     pts = rays[b] * inside[:, None]
     return np.concatenate([pts] + [pts @ A.T + c for A, c in maps]), float(occ.any(axis=1).mean())
@@ -139,3 +177,81 @@ def find_plane(mask: np.ndarray, K: np.ndarray, planes, axis: np.ndarray, d_lo: 
             if s > best:
                 best_d, best = float(d), s
     return best_d, best[0]
+
+
+# ------------------------------------------------------------- box from outline and axes
+
+def silhouette_tangents(corners: np.ndarray, v: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+    """The two lines through the image point v (homogeneous, may lie at infinity) that touch
+    the convex outline with the given corner points (M, 2): all corners on one side. Each
+    line is (a, b, c) with a^2 + b^2 = 1. None if v lies inside the outline."""
+    ph = np.c_[corners, np.ones(len(corners))]
+    lines = np.cross(np.asarray(v, dtype=np.float64)[None, :], ph)
+    norm = np.hypot(lines[:, 0], lines[:, 1])
+    lines = lines[norm > 1e-12] / norm[norm > 1e-12, None]
+    side = lines @ ph.T                                          # [line, corner]
+    eps = 1e-6 * (1.0 + np.abs(side).max())
+    touch = (side >= -eps).all(axis=1) | (side <= eps).all(axis=1)
+    if touch.sum() < 2:
+        return None
+    cand = lines[touch]
+    cos = np.abs(cand[:, :2] @ cand[:, :2].T)                    # the two that differ most
+    i, j = np.unravel_index(np.argmin(cos), cos.shape)
+    return (cand[i], cand[j]) if i != j else None
+
+
+def fit_box(mask: np.ndarray, K: np.ndarray, axes: np.ndarray) -> Box | None:
+    """Box with faces perpendicular to `axes` whose outline in the image touches the
+    silhouette, centred on the symmetry plane n . X = 1 (n is the first row of `axes`).
+
+    A line through the vanishing point of axis j that touches the silhouette is the image
+    of a box edge along j. Seen along j the box is a rectangle and the edge one of its
+    corners, and that corner lies on a line through the camera centre: one homogeneous
+    equation in two face positions. The three axes give six tangents and six equations for
+    the six faces, up to scale; the symmetry plane fixes the scale. With a silhouette that
+    is the outline of a box the equations agree (misfit 0). None if a vanishing point lies
+    inside the silhouette, or if the outline does not determine a box (a frontal view shows
+    one face only)."""
+    edge = mask & ~ndi.binary_erosion(mask)
+    ys, xs = np.nonzero(edge)
+    if len(xs) < 3:
+        return None
+    pts = np.c_[xs, ys].astype(np.float64)
+    try:
+        corners = pts[ConvexHull(pts).vertices]
+    except Exception:                                            # all points on one line
+        return None
+    centre = np.array([xs.mean(), ys.mean(), 1.0])
+    rows = []
+    for j in range(3):
+        a, b = (k for k in range(3) if k != j)
+        pair = silhouette_tangents(corners, K @ axes[j])
+        if pair is None:
+            return None
+        for t in pair:
+            side = np.sign(t @ centre)                           # the box lies on this side of the line
+            ca, cb = t @ K @ axes[a], t @ K @ axes[b]
+            row = np.zeros(6)                                    # columns: lo and hi of the three axes
+            row[2 * a + (0 if side * ca > 0 else 1)] = ca        # the corner nearest to the line
+            row[2 * b + (0 if side * cb > 0 else 1)] = cb
+            rows.append(row / max(np.linalg.norm(row), 1e-12))
+    _, sv, vt = np.linalg.svd(np.array(rows))
+    x = vt[-1]
+    if sv[4] < 1e-3 * sv[0] or abs(x[0] + x[1]) < 1e-9:
+        return None
+    x = x * 2.0 / (x[0] + x[1])                                  # the symmetry plane is n . X = 1
+    lo, hi = x[0::2], x[1::2]
+    if np.any(hi - lo <= 1e-3 * np.abs(hi - lo).max()):
+        return None
+    return Box(np.asarray(axes, dtype=np.float64), lo, hi, float(sv[5] / sv[4]))
+
+
+def box_covers(mask: np.ndarray, K: np.ndarray, box: Box, tolerance_px: float = 3.0) -> float:
+    """Share of the silhouette that lies inside the image of the box."""
+    X = box.corners()
+    if np.any(X[:, 2] <= 1e-6):
+        return 0.0
+    p = X @ K.T
+    eq = ConvexHull(p[:, :2] / p[:, 2:]).equations               # a x + b y + c <= 0 inside
+    ys, xs = np.nonzero(mask)
+    return float((np.c_[xs, ys] @ eq[:, :2].T + eq[:, 2] <= tolerance_px).all(axis=1).mean())

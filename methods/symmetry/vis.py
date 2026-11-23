@@ -24,7 +24,8 @@ def figure(res: Result, title: str = "") -> plt.Figure:
     if "n_segments" in info:
         head += (f"  edges={info['n_segments']} (explained {info.get('frame_explained', 0)}, on the normal "
                  f"{info.get('frame_lines', 0)}, sigma {info.get('normal_sigma_deg', '-')} deg"
-                 f"{', refused: ' + info['line_reject'] if info.get('line_reject') else ''})")
+                 f"{', refused: ' + info['line_reject'] if info.get('line_reject') else ''})"
+                 f"  box={'yes' if info.get('box') else 'no'}")
     if info.get("plane_source") != "lines":
         head += (f"  matches={info.get('n_matches', 0)}  inliers={info.get('n_inliers', 0)}  "
                  f"lines={info.get('support', 0)} (chance {info.get('chance', 0)})")
@@ -79,6 +80,15 @@ def figure(res: Result, title: str = "") -> plt.Figure:
     if d is not None and len(d.points):
         kept = dbg.get("kept", np.ones(len(d.points), bool))
         ax.scatter(d.pixels[kept, 0], d.pixels[kept, 1], c=d.points[kept, 2], s=2, cmap="turbo")
+    box = dbg.get("box")
+    if box is not None:                                      # the box of the edge frame, in the image
+        c = box.corners() @ dbg["K"].T
+        c = c[:, :2] / c[:, 2:]
+        for i in range(8):
+            for bit in (1, 2, 4):
+                if not i & bit:
+                    ax.plot(c[[i, i | bit], 0], c[[i, i | bit], 1], color="orange", lw=1.0)
+        ax.set_title("box from outline and axes (orange), epipolar lines", fontsize=9)
 
     pts, hull = _subsample(res.points, 15000), _subsample(res.hull, 15000, 1)
     for ax, (a, b), name in ((axes[2], (0, 2), "top view (x, z)"), (axes[3], (0, 1), "front view (x, y)")):

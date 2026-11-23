@@ -15,7 +15,7 @@ therefore be read from the straight edges alone, without matching any feature.
 3. three perpendicular axes: furniture is mostly box-like, its edges run along its width,
    depth and height. Fitting the three axes together is more accurate than three separate
    directions and tells whether the object is box-like at all.
-4. the normal: the horizontal axis with the most edges (plane_normal), or no answer.
+4. the normal: the horizontal axis that faces the camera least (plane_normal), or no answer.
 
 Everything is in the camera frame of geometry.py (x right, y down, z forward).
 """
@@ -233,7 +233,7 @@ def support(K: np.ndarray, d: np.ndarray, seg: Segments, tol: np.ndarray, bin_px
 
 
 def vanishing_directions(K: np.ndarray, seg: Segments, max_dirs: int = 4, tol_deg: float = 1.5,
-                         tol_px: float = 1.0, n_hyp: int = 2000, min_lines: int = 3,
+                         tol_px: float = 2.0, n_hyp: int = 2000, min_lines: int = 3,
                          min_total: float = 0.0, bin_px: float = 4.0, seed: int = 0) -> list[Direction]:
     """Directions in space to which many segments point, strongest first.
 
@@ -354,12 +354,13 @@ def refine_frame(K: np.ndarray, axes: np.ndarray, seg: Segments, inl: np.ndarray
     return axes @ _rotation(sol.x).T
 
 
-def frame_uncertainty(K: np.ndarray, axes: np.ndarray, seg: Segments, inl: np.ndarray, tol: np.ndarray) -> np.ndarray:
+def frame_uncertainty(K: np.ndarray, axes: np.ndarray, seg: Segments, inl: np.ndarray,
+                      noise_px: float = 1.0) -> np.ndarray:
     """How well the segments hold each axis in place: standard deviation in degrees of the
-    direction of every axis, if each segment end were off by its tolerance (first-order
+    direction of every axis, if each segment end were off by `noise_px` pixels (first-order
     propagation through the fit of refine_frame). Large for an object that is seen almost
     in parallel projection and shows edges of only two of the three directions."""
-    fun = _residuals(K, axes, seg, inl, tol)
+    fun = _residuals(K, axes, seg, inl, np.full(len(seg), noise_px))
     h = 1e-4
     J = np.stack([(fun(h * e) - fun(-h * e)) / (2.0 * h) for e in np.eye(3)], axis=1)
     cov = np.linalg.pinv(J.T @ J, rcond=1e-12)
@@ -373,7 +374,7 @@ def frame_uncertainty(K: np.ndarray, axes: np.ndarray, seg: Segments, inl: np.nd
     return np.minimum(out, 90.0)
 
 
-def fit_frame(K: np.ndarray, seg: Segments, dirs: list[Direction], tol_deg: float = 1.5, tol_px: float = 1.0,
+def fit_frame(K: np.ndarray, seg: Segments, dirs: list[Direction], tol_deg: float = 1.5, tol_px: float = 2.0,
               bin_px: float = 4.0, max_first: int = 3) -> Frame | None:
     """Three perpendicular axes that explain as much segment length as possible.
 
@@ -420,56 +421,71 @@ def fit_frame(K: np.ndarray, seg: Segments, dirs: list[Direction], tol_deg: floa
 class LinePlane:
     """Result of plane_normal: the normal, or the reason why the lines do not give one."""
     normal: np.ndarray | None
-    reason: str                  # "" | no_lines | tilted | not_box | few_lines | uncertain
+    reason: str                  # "" | no_lines | tilted | not_box | few_lines | ambiguous | unconfirmed | uncertain
     segments: Segments
     frame: Frame | None = None
     axis: int = -1               # row of frame.axes that is the normal
     up: int = -1                 # row of frame.axes that is the vertical
     explained: float = 0.0       # share of the edge length that is straight and points to an axis
     sigma_deg: float = 90.0      # uncertainty of the normal (frame_uncertainty)
+    agree_deg: float = 90.0      # angle between the normal and the nearest vanishing direction found alone
     gravity_off_deg: float = 90.0
+    frame_ok: bool = False       # upright and box-like: the three axes can be used, whatever the normal
 
 
-def plane_normal(gray: np.ndarray, region: np.ndarray, K: np.ndarray, size: float, min_length: float = 20.0,
-                 tol_deg: float = 1.5, min_explained: float = 0.75, max_sigma_deg: float = 5.0,
-                 max_gravity_off_deg: float = 20.0, min_lines: int = 3, min_share: float = 0.25,
-                 blur: float = 1.0, seed: int = 0) -> LinePlane:
+def plane_normal(gray: np.ndarray, region: np.ndarray, K: np.ndarray, centre: np.ndarray, size: float,
+                 min_length: float = 20.0, tol_deg: float = 1.5, tol_px: float = 2.0, min_explained: float = 0.5,
+                 max_sigma_deg: float = 1.5, max_agree_deg: float = 5.0, max_gravity_off_deg: float = 20.0,
+                 min_lines: int = 3, min_view_gap_deg: float = 5.0, min_share: float = 0.25, blur: float = 1.0,
+                 seed: int = 0) -> LinePlane:
     """Normal of the symmetry plane of an upright, box-like object from its straight edges.
 
     The edges are explained by three perpendicular axes (fit_frame). One of them is the
-    vertical; of the two horizontal ones the normal is the axis with the most distinct
-    edges, because the front and back edges, rails, shelves and drawer fronts of furniture
-    run across its width. The answer is refused when
+    vertical. Of the two horizontal ones the normal is the axis that the camera looks along
+    least: furniture is photographed from its front, so the viewing ray (`centre`, the unit
+    ray to the middle of the object) is closer to the symmetry plane than to its normal.
+    The answer is refused when
 
-      tilted     no axis is close to a possible direction of gravity
-      not_box    less than `min_explained` of the edge length is straight and points to one
-                 of the three axes (curved edges and edges in other directions count against)
-      few_lines  the chosen axis has fewer than `min_lines` edges or less than `min_share`
-                 of the object size in total
-      uncertain  the edges hold the axis in place only to more than `max_sigma_deg`
+      tilted       no axis is close to a possible direction of gravity
+      not_box      less than `min_explained` of the edge length is straight and points to one
+                   of the three axes (curved edges and edges in other directions count against)
+      few_lines    fewer than `min_lines` edges point along the normal
+      ambiguous    the camera looks along both horizontal axes equally (their view angles
+                   differ by less than `min_view_gap_deg`), front and side cannot be told apart
+      unconfirmed  no vanishing direction found without the other two axes lies within
+                   `max_agree_deg` of the normal: the axis rests on the perpendicularity alone
+      uncertain    one pixel of error at the segment ends moves the normal by more than
+                   `max_sigma_deg`
 
-    `size` is the diagonal of the object in pixels. `blur` >= 1 says by how much the image
-    is softer than a sharp one, for a photo that was enlarged: the gradient filter gets
-    wider, the gradient thresholds lower and the straightness test looser by this factor.
-    The sign of the normal is arbitrary."""
+    All limits were chosen on 639 Pix3D images (configs/dev_large_pix3d.txt). `size` is the
+    diagonal of the object in pixels. `blur` >= 1 says by how much the image is softer than
+    a sharp one, for a photo that was enlarged: the gradient filter gets wider, the gradient
+    thresholds lower and the straightness test looser by this factor. The sign of the normal
+    is arbitrary."""
     seg = detect_segments(gray, region, sigma=1.2 * blur, low=0.012 / blur, high=0.03 / blur,
                           min_length=min_length, max_rms=0.5 * blur)
-    dirs = vanishing_directions(K, seg, tol_deg=tol_deg, min_total=min_share * size, seed=seed)
-    frame = fit_frame(K, seg, dirs, tol_deg=tol_deg)
+    dirs = vanishing_directions(K, seg, tol_deg=tol_deg, tol_px=tol_px, min_total=min_share * size, seed=seed)
+    frame = fit_frame(K, seg, dirs, tol_deg=tol_deg, tol_px=tol_px)
     if frame is None:
         return LinePlane(None, "no_lines", seg)
     up, off = vertical_axis(frame.axes)
-    k = max((j for j in range(3) if j != up), key=lambda j: (frame.lines[j], frame.length[j]))
-    tol = tolerance(seg.length, tol_deg, 1.0)
+    view = np.degrees(np.arcsin(np.minimum(1.0, np.abs(frame.axes @ centre))))
+    k, other = sorted((j for j in range(3) if j != up), key=lambda j: view[j])
     explained = float(frame.length.sum() / max(seg.length.sum() + seg.curved, 1e-9))
     out = LinePlane(None, "", seg, frame, k, up, explained,
-                    float(frame_uncertainty(K, frame.axes, seg, frame.inliers, tol)[k]), off)
+                    float(frame_uncertainty(K, frame.axes, seg, frame.inliers)[k]),
+                    min(angle_between(frame.axes[k], d.d) for d in dirs), off)
+    out.frame_ok = off <= max_gravity_off_deg and out.explained >= min_explained
     if off > max_gravity_off_deg:
         out.reason = "tilted"
     elif out.explained < min_explained:
         out.reason = "not_box"
-    elif frame.lines[k] < min_lines or frame.length[k] < min_share * size:
+    elif frame.lines[k] < min_lines:
         out.reason = "few_lines"
+    elif view[other] - view[k] < min_view_gap_deg:
+        out.reason = "ambiguous"
+    elif out.agree_deg > max_agree_deg:
+        out.reason = "unconfirmed"
     elif out.sigma_deg > max_sigma_deg:
         out.reason = "uncertain"
     else:

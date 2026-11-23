@@ -37,6 +37,8 @@ def main() -> None:
     ap.add_argument("--align", default="icp", choices=["icp", "camera", "none"])
     ap.add_argument("--n-points", type=int, default=10000)
     ap.add_argument("--tau", type=float, default=0.05, help="F-score threshold, units of object size")
+    ap.add_argument("--table", default="shape", help="result table to write to; shape_<name> keeps the "
+                    "runs on another image list (--subset) apart from the evaluation subset")
     a = ap.parse_args()
     gt_frame = "camera" if a.align == "camera" else a.gt_frame
 
@@ -55,8 +57,8 @@ def main() -> None:
 
     if not rows:
         raise SystemExit(f"no predictions found under outputs/{a.method}/pix3d/ for {a.subset}")
-    results.write_csv("shape", a.method, rows)
-    summary = results.summarize("shape")
+    results.write_csv(a.table, a.method, rows)
+    summary = results.summarize(a.table)
     print(f"{a.method}: {len(rows)} objects evaluated, {len(missing)} without a prediction")
     for m in SHAPE_METRIC_NAMES:
         print(f"  {m:13s} {np.mean([r[m] for r in rows]):.4f}")

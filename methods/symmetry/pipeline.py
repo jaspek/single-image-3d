@@ -6,8 +6,8 @@
    by RANSAC over the mirror pairs (two pairs per sample)
 4. guided matching along the epipolar lines, refine n, triangulate the pairs
 5. dense search along the epipolar lines; silhouette intersection with the mirrored view
-6. with a normal from the edges: test the other two axes of the edge frame as further
-   symmetry planes and intersect the silhouette cones of all mirrored views (hull.py)
+6. with a normal from the edges: cut the intersection down to the box that the outline
+   and the three axes of the edge frame give (hull.py)
 
 All points are in the camera frame (x right, y down, z forward). The scale is fixed by
 placing the symmetry plane at distance 1 from the camera centre.
@@ -31,6 +31,7 @@ from methods.symmetry import lines as line_mod
 @dataclass
 class Params:
     plane_from: str = "auto"      # the normal comes from: lines | features | auto (lines, else features)
+    symmetry: bool = True         # False: no symmetry plane, the shape is the box of the edge frame alone
     work_size: int = 640          # longer side of the object crop after resizing, pixels
     max_upscale: float = 3.0
     contrast: float = 0.008       # DoG contrast threshold (image in [0, 1])
@@ -51,12 +52,14 @@ class Params:
     min_dense_ratio: float = 0.3  # share of textured pixels with a dense match that confirms a plane
     min_view_deg: float = 10.0    # angle between the viewing ray and the symmetry plane: below this
     max_view_deg: float = 75.0    # the baseline is too short, above it the partner faces are hidden
-    max_line_upscale: float = 2.0 # edges are not used if the object had to be enlarged by more than this
     line_min_length: float = 20.0 # shortest straight edge that is used, pixels at working resolution
     vp_tol_deg: float = 1.5       # an edge points to a vanishing point within this angle
-    min_explained: float = 0.75   # share of the edge length that three perpendicular axes must explain
-    max_normal_sigma: float = 5.0 # largest accepted uncertainty of a normal from the edges, degrees
-    more_planes: bool = True      # try the other axes of the edge frame as further symmetry planes
+    min_explained: float = 0.5    # share of the edge length that three perpendicular axes must explain
+    max_normal_sigma: float = 1.5 # largest accepted uncertainty of a normal from the edges, degrees
+    max_normal_agree: float = 5.0 # the normal must lie this close to a vanishing direction found alone
+    box: bool = True              # bound the shape by the box that the outline and the edge frame give
+    max_box_misfit: float = 0.2   # the six tangents of the outline must agree on one box this well
+    more_planes: bool = False     # try the other axes of the edge frame as further symmetry planes
     min_coverage: float = 0.98    # share of the silhouette that must stay covered with a further plane
     hull_tolerance: int = 4       # pixels by which the silhouette is widened for the further planes
     seed: int = 0
@@ -64,7 +67,7 @@ class Params:
 
 @dataclass
 class Result:
-    status: str                              # ok | no_object | few_features | no_symmetry | frontal | side
+    status: str                 # ok | no_object | few_features | no_symmetry | frontal | side | no_frame | no_box
     normal: np.ndarray | None = None         # symmetry plane n . X = 1 in the camera frame
     points: np.ndarray = field(default_factory=lambda: np.zeros((0, 3)))   # matched points + mirror copies
     hull: np.ndarray = field(default_factory=lambda: np.zeros((0, 3)))     # silhouette intersection surface
@@ -201,23 +204,28 @@ def reconstruct(image: np.ndarray, mask: np.ndarray, K: np.ndarray, params: Para
         return view
 
     source = "given" if normal is not None else "features"
-    if normal is None and p.plane_from in ("lines", "auto"):
-        if A[0, 0] > p.max_line_upscale:
-            # An object of a few hundred pixels: its edges are too short and too soft to tell
-            # where they meet.
-            info["line_reject"] = "small"
-        else:
-            # The edges are taken from the photo itself, not from the outline of the mask.
-            lp = line_mod.plane_normal(raw, ndi.binary_dilation(m, iterations=4), Kw, size, p.line_min_length,
-                                       p.vp_tol_deg, p.min_explained, p.max_normal_sigma,
-                                       blur=max(1.0, A[0, 0] / 1.5), seed=p.seed)
-            info.update(n_segments=len(lp.segments), line_reject=lp.reason,
-                        frame_explained=round(lp.explained, 2), normal_sigma_deg=round(lp.sigma_deg, 2),
-                        frame_lines=int(lp.frame.lines[lp.axis]) if lp.frame is not None else 0)
-            debug["lines"] = lp
-            if lp.normal is not None:
-                normal, source = (lp.normal if lp.normal @ centre_ray > 0 else -lp.normal), "lines"
-        if normal is None and p.plane_from == "lines":
+    lp = None
+    if normal is None and (p.plane_from in ("lines", "auto") or not p.symmetry):
+        # The edges are taken from the photo itself, not from the outline of the mask, which
+        # is a hand-drawn polygon; the band around the mask allows for its error.
+        lp = line_mod.plane_normal(raw, ndi.binary_dilation(m, iterations=8), Kw, centre_ray, size,
+                                   min_length=p.line_min_length, tol_deg=p.vp_tol_deg,
+                                   min_explained=p.min_explained, max_sigma_deg=p.max_normal_sigma,
+                                   max_agree_deg=p.max_normal_agree, blur=max(1.0, A[0, 0] / 1.5), seed=p.seed)
+        info.update(n_segments=len(lp.segments), line_reject=lp.reason, frame_explained=round(lp.explained, 2),
+                    normal_sigma_deg=round(lp.sigma_deg, 2), normal_agree_deg=round(lp.agree_deg, 1),
+                    frame_lines=int(lp.frame.lines[lp.axis]) if lp.frame is not None else 0)
+        debug["lines"] = lp
+        if not p.symmetry:
+            # Only the frame is needed. Its horizontal axis that faces the camera least sets
+            # the unit of length, as the normal does otherwise; it need not be a symmetry axis.
+            if not lp.frame_ok:
+                return stop("no_frame")
+            axis = lp.frame.axes[lp.axis]
+            normal, source = (axis if axis @ centre_ray > 0 else -axis), "frame"
+        elif lp.normal is not None:
+            normal, source = (lp.normal if lp.normal @ centre_ray > 0 else -lp.normal), "lines"
+        elif p.plane_from == "lines":
             return stop("no_symmetry")
     info["plane_source"] = source
 
@@ -246,19 +254,19 @@ def reconstruct(image: np.ndarray, mask: np.ndarray, K: np.ndarray, params: Para
     else:
         n = np.asarray(normal, dtype=np.float64) / np.linalg.norm(normal)
         use, confirmed = np.zeros((0, 2), np.int64), True
-        if len(f) > 1:
+        if p.symmetry and len(f) > 1:
             use = guided_matches(f, Kw, n, p.thr, min_sep, ori_tol_deg=p.ori_tol_deg)
     info["n_guided"] = len(use)
     debug["normal"] = n
     view = note_plane(n)
-    if view < p.min_view_deg:
+    if p.symmetry and view < p.min_view_deg:
         return stop("frontal", n)
-    if view > p.max_view_deg:
+    if p.symmetry and view > p.max_view_deg:
         return stop("side", n)
 
     step = max(p.dense_step, int(np.ceil(np.sqrt(m.sum() / p.dense_max_pixels))))
     normals = dense_mod.plane_normals(n, p.dense_normals)
-    if p.dense:
+    if p.symmetry and p.dense:
         def quick_scan(plane: np.ndarray):
             """Dense search on a coarse grid; share of the textured pixels that find a partner."""
             c = dense_mod.epipolar_scan(gray, m, Kw, plane, step=4 * step,
@@ -283,57 +291,82 @@ def reconstruct(image: np.ndarray, mask: np.ndarray, K: np.ndarray, params: Para
     if not confirmed:
         return stop("no_symmetry", n)
 
-    X, _, valid = geo.triangulate(Kw, n, f.xy[use[:, 0]], f.xy[use[:, 1]])
-    valid &= geo.epipolar_distance(Kw, n, f.xy[use[:, 0]], f.xy[use[:, 1]]) < p.thr
-    valid &= feat_mod.along_line(f, use[:, 0], use[:, 1]) >= p.min_along     # no depth from a sliding pair
-    use, X = use[valid], X[valid]
-    half = [X]
-    hull = np.zeros((0, 3))
-    if p.dense or p.hull:
-        d = dense_mod.epipolar_scan(gray, m, Kw, n, step=step, normals=normals, min_ncc=p.min_ncc,
-                                    match=p.dense, hull=p.hull)
-        if p.dense:
-            half.append(d.points)
-        hull = d.hull
-        debug["dense"] = d
-    half = np.concatenate(half)
-    open_hull = np.r_[hull, geo.reflect(hull, n)]                  # as the two cones leave it
-    keep = np.ones(len(half), bool)
-    if len(half) >= 30:
-        box = main_box(X if len(X) >= 30 else half, n)
-        keep = in_box(half, n, box)
-        # two silhouettes leave the shape open along the symmetry plane, the more the smaller
-        # the view angle; with enough matched points, cut it where they end
-        hull = hull[in_box(hull, n, box)]
-    debug.update(used=use[keep[:len(X)]], sparse=X[keep[:len(X)]], kept=keep[len(X):])
-    half = half[keep]
-    points = np.r_[half, geo.reflect(half, n)]
-    hull = np.r_[hull, geo.reflect(hull, n)]
+    points = hull = open_hull = np.zeros((0, 3))
+    n_sparse = n_dense = 0
+    if p.symmetry:
+        X, _, valid = geo.triangulate(Kw, n, f.xy[use[:, 0]], f.xy[use[:, 1]])
+        valid &= geo.epipolar_distance(Kw, n, f.xy[use[:, 0]], f.xy[use[:, 1]]) < p.thr
+        valid &= feat_mod.along_line(f, use[:, 0], use[:, 1]) >= p.min_along     # no depth from a sliding pair
+        use, X = use[valid], X[valid]
+        half = [X]
+        if p.dense or p.hull:
+            d = dense_mod.epipolar_scan(gray, m, Kw, n, step=step, normals=normals, min_ncc=p.min_ncc,
+                                        match=p.dense, hull=p.hull)
+            if p.dense:
+                half.append(d.points)
+            hull = d.hull
+            debug["dense"] = d
+        half = np.concatenate(half)
+        open_hull = np.r_[hull, geo.reflect(hull, n)]              # as the two cones leave it
+        keep = np.ones(len(half), bool)
+        if len(half) >= 30:
+            limits = main_box(X if len(X) >= 30 else half, n)
+            keep = in_box(half, n, limits)
+            # two silhouettes leave the shape open along the symmetry plane, the more the smaller
+            # the view angle; with enough matched points, cut it where they end
+            hull = hull[in_box(hull, n, limits)]
+        debug.update(used=use[keep[:len(X)]], sparse=X[keep[:len(X)]], kept=keep[len(X):])
+        half = half[keep]
+        points = np.r_[half, geo.reflect(half, n)]
+        hull = np.r_[hull, geo.reflect(hull, n)]
+        n_sparse, n_dense = int(keep[:len(X)].sum()), int(keep[len(X):].sum())
 
-    planes = [(n, 1.0)]
-    if p.hull and p.more_planes and source == "lines" and len(open_hull) >= 100:
-        # Box-like furniture is often symmetric front to back and top to bottom as well. Each
-        # such plane adds mirrored cameras and closes the shape where two cones leave it open.
-        # The search starts from the two cones alone, not from the matched points.
-        lp = debug["lines"]
-        z_lo, z_hi = 0.8 * float(open_hull[:, 2].min()), 1.25 * float(open_hull[:, 2].max())
-        for k in [j for j in range(3) if j not in (lp.axis, lp.up)] + [lp.up]:
-            axis = lp.frame.axes[k]
-            lo, hi = np.quantile(open_hull @ axis, [0.02, 0.98])
-            offset, cover = hull_mod.find_plane(m, Kw, planes, axis, float(lo), float(hi), z_lo, z_hi,
-                                                tolerance_px=p.hull_tolerance)
-            info["coverage_up" if k == lp.up else "coverage_depth"] = round(cover, 3)
-            if cover >= p.min_coverage:
-                planes.append((axis, offset))
-        if len(planes) > 1:
-            closed, _ = hull_mod.surface(m, Kw, planes, z_lo, z_hi, max_pixels=p.dense_max_pixels,
-                                         tolerance_px=p.hull_tolerance)
+    # With the edge frame the other two axes are known as well. The bounds below start from
+    # the frame and from the two cones alone, not from the matched points.
+    planes = [(n, 1.0)] if p.symmetry else []
+    box = None
+    frame = lp.frame if lp is not None and source in ("lines", "frame") else None
+    if p.hull and frame is not None and (p.box or p.more_planes):
+        other = [j for j in range(3) if j not in (lp.axis, lp.up)][0]
+        z_range = None
+        if len(open_hull) >= 100:
+            z_range = 0.8 * float(open_hull[:, 2].min()), 1.25 * float(open_hull[:, 2].max())
+        if p.more_planes and z_range is not None:
+            # Box-like furniture is often symmetric front to back and top to bottom too. Each
+            # such plane adds mirrored cameras, if the silhouette stays covered with it.
+            for k in (other, lp.up):
+                lo, hi = np.quantile(open_hull @ frame.axes[k], [0.02, 0.98])
+                offset, cover = hull_mod.find_plane(m, Kw, planes, frame.axes[k], float(lo), float(hi), *z_range,
+                                                    tolerance_px=p.hull_tolerance)
+                info["coverage_up" if k == lp.up else "coverage_depth"] = round(cover, 3)
+                if cover >= p.min_coverage:
+                    planes.append((frame.axes[k], offset))
+        if p.box:
+            # The object lies inside the box whose faces are perpendicular to the three axes
+            # and touch its outline. This needs no symmetry; it closes what the cones leave open.
+            box = hull_mod.fit_box(m, Kw, np.stack([n, frame.axes[other], frame.axes[lp.up]]))
+            if box is not None:
+                info["box_misfit"] = round(box.misfit, 3)
+                if (box.misfit > p.max_box_misfit or box.corners()[:, 2].min() <= 0
+                        or hull_mod.box_covers(m, Kw, box) < p.min_coverage):
+                    box = None
+            if box is not None:
+                for axis, offset in planes[1:]:                    # symmetric about the further planes too
+                    j = int(np.argmax(np.abs(box.axes @ axis)))
+                    reach = max(offset - box.lo[j], box.hi[j] - offset)
+                    box.lo[j], box.hi[j] = offset - reach, offset + reach
+                depth = box.corners()[:, 2]
+                z_range = 0.95 * float(depth.min()), 1.05 * float(depth.max())
+        if (len(planes) > 1 or box is not None) and z_range is not None and z_range[0] > 0:
+            closed, _ = hull_mod.surface(m, Kw, planes, *z_range, max_pixels=p.dense_max_pixels,
+                                         tolerance_px=p.hull_tolerance, box=box)
             if len(closed):
                 hull = closed
-    info["n_planes"] = len(planes)
-    debug["planes"] = planes
-    info.update(n_sparse=int(keep[:len(X)].sum()), n_dense=int(keep[len(X):].sum()),
+    info.update(box=int(box is not None), n_planes=len(planes), n_sparse=n_sparse, n_dense=n_dense,
                 n_points=len(points), n_hull=len(hull))
+    debug.update(box=box, planes=planes)
+    if not p.symmetry and box is None:
+        return stop("no_box", n)
     if len(points) == 0 and len(hull) == 0:
         return stop("no_symmetry", n)
     info["seconds"] = round(time.time() - t0, 2)
