@@ -17,8 +17,13 @@ search, `camera` = one scale factor about the camera centre (prediction in the c
 frame), `none`. Numbers with different `align` are not directly comparable. The `n` column
 of the summary counts the images that have a prediction.
 
-- `symmetry_status.csv`: one row per image for the symmetry method (status, number of
-  matches, detected plane, view angle), including the images where no plane was accepted.
+- `symmetry_status.csv`: one row per image for the symmetry method (status, source of the
+  plane, reason of a refusal, detected plane, view angle), including the images where no
+  plane was accepted.
 - `symmetry_plane.csv`: the detected plane against the symmetry planes of the CAD model.
-- `shape/symmetry_trueplane_hull.csv` is an analysis row, not a method: the silhouette
-  intersection with the symmetry plane taken from the CAD model and the annotated pose.
+- `shape/symmetry_hull.csv` is the result of the symmetry method (plane from the straight
+  edges, silhouette intersection); `shape/symmetry.csv` are its matched points.
+- Variants of the symmetry method, for comparison only: `symmetry_features*` takes the plane
+  from mirrored feature pairs, `symmetry_twocones_hull` uses the plane from the edges with
+  one mirrored camera only, `symmetry_trueplane_hull` takes the plane from the CAD model
+  and the annotated pose.
