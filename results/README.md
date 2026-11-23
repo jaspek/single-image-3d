@@ -18,12 +18,17 @@ frame), `none`. Numbers with different `align` are not directly comparable. The 
 of the summary counts the images that have a prediction.
 
 - `symmetry_status.csv`: one row per image for the symmetry method (status, source of the
-  plane, reason of a refusal, detected plane, view angle), including the images where no
-  plane was accepted.
+  plane, reason of a refusal, box, detected plane, view angle), including the images where
+  no plane was accepted.
 - `symmetry_plane.csv`: the detected plane against the symmetry planes of the CAD model.
 - `shape/symmetry_hull.csv` is the result of the symmetry method (plane from the straight
-  edges, silhouette intersection); `shape/symmetry.csv` are its matched points.
-- Variants of the symmetry method, for comparison only: `symmetry_features*` takes the plane
-  from mirrored feature pairs, `symmetry_twocones_hull` uses the plane from the edges with
-  one mirrored camera only, `symmetry_trueplane_hull` takes the plane from the CAD model
-  and the annotated pose.
+  edges, silhouette intersection cut down to the box of the edge frame); `shape/symmetry.csv`
+  are its matched points.
+- Variants of the symmetry method, for comparison only: `symmetry_twocones_hull` leaves the
+  box out, `box_hull` uses the box alone without a symmetry plane (`box_status.csv`),
+  `symmetry_features*` takes the plane from mirrored feature pairs, `symmetry_trueplane_hull`
+  takes the plane from the CAD model and the annotated pose.
+- `shape_holdout/` and `shape_holdout_summary.md`: the same three variants on the 639 images
+  of `configs/holdout_pix3d.txt`, kept apart from the table of the evaluation subset
+  (`eval_shape.py --table shape_holdout`). `holdout_symmetry_status.csv`,
+  `holdout_symmetry_plane.csv` and `holdout_box_status.csv` belong to these runs.

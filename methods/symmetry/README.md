@@ -5,6 +5,9 @@ calibration from a single image" (IJCV). A mirror-symmetric object seen once is 
 two views of it: looking at the mirror image of a point with the real camera equals looking
 at the point with a second, mirrored camera. Everything here is numpy/scipy, no OpenCV.
 
+On furniture photos the symmetry plane is read from the straight edges of the object. The
+same edges give three perpendicular axes and, with the outline, a box that bounds the shape.
+
 ## Geometry
 
 Camera frame: x right, y down, z forward. The object is symmetric about the plane
@@ -48,9 +51,10 @@ Camera frame: x right, y down, z forward. The object is symmetric about the plan
    back from the partner, mirror image must beat shifted copy, larger window, depth agrees
    with the neighbours. On by default only for the rendered objects, see below.
 6. Silhouette intersection: the partner must fall inside the mask, which bounds the depth of
-   every pixel. This is a two-view visual hull with the mirrored camera as second view.
-7. With a normal from the edges: further symmetry planes and the intersection of the
-   silhouette cones of all mirrored cameras (`hull.py`), see below.
+   every pixel. This is a two-view visual hull with the mirrored camera as second view
+   ("two cones").
+7. With a normal from the edges: the intersection is cut down to the box that the outline
+   and the three axes give (`hull.py`), see below.
 
 ## Plane from the straight edges (`lines.py`)
 
@@ -66,67 +70,99 @@ Camera frame: x right, y down, z forward. The object is symmetric about the plan
    explains the most edge length is refined as a whole. An axis with few or short edges is
    held in place by the other two.
 4. The vertical is the axis closest to a possible direction of gravity (camera not rolled,
-   pitched between -15 and 65 deg). Of the two horizontal axes the normal is the one with
-   the most distinct edges: front and back edges, rails, shelves and drawer fronts of
-   furniture run across its width.
+   pitched between -15 and 65 deg). Of the two horizontal axes the normal is the one that
+   the camera looks along least: furniture is photographed from its front, so the viewing
+   ray is closer to the symmetry plane than to its normal.
 
 The answer is refused, and the image gets no reconstruction, when
 
 | reason | test |
 |---|---|
-| `small` | the object had to be enlarged more than 2 times to reach 640 px |
 | `no_lines` | no three axes found |
 | `tilted` | no axis within 20 deg of a possible direction of gravity |
-| `not_box` | less than 75 % of the edge length is straight and points to one of the axes |
-| `few_lines` | fewer than 3 edges on the normal |
-| `uncertain` | the edges hold the normal in place only to more than 5 deg (error propagation; happens with a long lens and edges of only two directions) |
+| `not_box` | less than 50 % of the edge length is straight and points to one of the axes |
+| `few_lines` | fewer than 3 edges point along the normal |
+| `ambiguous` | the camera looks along both horizontal axes equally (within 5 deg): front and side cannot be told apart |
+| `unconfirmed` | no vanishing direction found without the other two axes lies within 5 deg of the normal |
+| `uncertain` | one pixel of error at the segment ends moves the normal by more than 1.5 deg (error propagation; happens with a long lens and edges of only two directions) |
+
+The rule for the normal and all limits were chosen on 639 Pix3D images
+(`configs/dev_large_pix3d.txt`) and checked once on 639 others (`configs/holdout_pix3d.txt`).
+Tried on the first list and dropped:
+
+- The axis with the most edges as the normal. Where only one horizontal axis is right, it
+  picks that one in 66 % of the images, the front-view rule in 78 % (94 % without desks,
+  see "Where it breaks").
+- Mirror pairs of line segments as evidence for the normal: 62 %.
+- A limit on the size of the object in the photo: small images are not less often right.
+- A logistic regression over thirteen measures of the frame instead of the two tests
+  `unconfirmed` and `uncertain`: the same precision at the same number of accepted planes.
 
 Whether the object really is symmetric about the plane is not tested. The edges only say
-that the plane is one of the three planes of a box.
+that the plane is one of the planes of a box.
 
-## More symmetry planes (`hull.py`)
+## Box from the outline and the axes (`hull.py`)
 
-Two silhouette cones leave the shape open along the symmetry plane. Box-like furniture is
-often symmetric front to back and top to bottom as well. Reflections at `k` perpendicular
-planes form a group of `2^k` elements, each one a camera, and a point of the object must
-project into the silhouette after every one of them.
+Two silhouette cones leave the shape open along the symmetry plane, and over every flat
+face a wedge remains between them. The three axes give a bound that needs no symmetry: the
+object lies inside the box whose faces are perpendicular to the axes and touch its outline.
 
-The normal of a further plane is an axis of the edge frame. Its position is found by a
-one-dimensional search: with the right position every pixel of the silhouette still sees a
-point of the intersection of all cones. If at least 98 % of the silhouette stays covered the
-plane is used, otherwise not (a chair has no second plane, the back has no counterpart in
-front). A plane that passes the test keeps the result consistent with the outline. It does
-not prove that the object has the symmetry, see "Where it breaks".
+A line through the vanishing point of an axis that touches the silhouette is the image of
+a box edge along that axis. Seen along the axis the box is a rectangle and the edge one of
+its corners, and that corner lies on a line through the camera centre: one homogeneous
+equation in two face positions. The three axes give six tangents, six equations for the six
+faces up to scale; the symmetry plane through the middle of the box fixes the scale
+(`fit_box`). For the outline of a box the six equations agree.
+
+There is no box when a vanishing point lies inside the outline, when the outline shows a
+single face (frontal view at the height of the object), when the six tangents disagree
+(misfit above 0.2) or when the box does not cover the outline.
+
+Because the box needs no symmetry, it can also stand alone: `--box-only` uses the edge
+frame and the outline, no symmetry plane and no mirrored camera. It also works for frontal
+views and for objects whose normal was refused.
+
+`--more-planes` tests the other two axes as further symmetry planes (a table is symmetric
+front to back as well) and intersects the cones of all mirrored cameras. A plane is used if
+98 % of the silhouette stays covered with it. This closes the shape too, but less well than
+the box, and together with the box it is worse than the box alone (F-score 0.74 against
+0.82 on the first list), so it is off.
 
 ## Run
 
 ```
 python methods/symmetry/run.py --demo --vis               # rendered test objects, no data needed
 python methods/symmetry/run.py --demo --demo-plain --vis  # the same objects without texture
-python methods/symmetry/run.py --vis                      # the Pix3D subset, plane from the edges
+python methods/symmetry/run.py --vis                      # the Pix3D subset: plane from the edges, two cones and box
 python methods/symmetry/run.py --ids 12 345 --vis         # single images
 python scripts/eval_shape.py --method symmetry_hull --align camera
-python scripts/eval_shape.py --method symmetry --align camera
 python methods/symmetry/eval_plane.py                     # detected plane against the CAD model
 
 # variants for comparison
+python methods/symmetry/run.py --no-box --name symmetry_twocones        # symmetry alone
+python methods/symmetry/run.py --box-only --name box                    # edge frame and outline alone
 python methods/symmetry/run.py --plane-from features --name symmetry_features
-python methods/symmetry/run.py --no-more-planes --name symmetry_twocones
 python methods/symmetry/run.py --true-plane --name symmetry_trueplane   # plane from the CAD model and pose
+
+# the held-out list (639 images), results in a table of its own
+python methods/symmetry/run.py --subset configs/holdout_pix3d.txt --name holdout_symmetry
+python methods/symmetry/eval_plane.py --name holdout_symmetry
+python scripts/eval_shape.py --method holdout_symmetry_hull --subset configs/holdout_pix3d.txt --align camera --table shape_holdout
 ```
 
 | output | content |
 |---|---|
-| `outputs/symmetry_hull/pix3d/<id>.npy` | surface of the silhouette intersection |
+| `outputs/symmetry_hull/pix3d/<id>.npy` | surface of the silhouette intersection, cut down to the box |
 | `outputs/symmetry/pix3d/<id>.npy` | matched points with their mirror copies |
-| `outputs/symmetry/vis/<id>.png` | edges by axis, matches, epipolar lines, top and front view |
-| `results/symmetry_status.csv` | per image: status, source of the plane, reason of a refusal, counts, normal, view angle |
+| `outputs/symmetry/vis/<id>.png` | edges by axis, box, epipolar lines, top and front view |
+| `results/symmetry_status.csv` | per image: status, source of the plane, reason of a refusal, box, normal, view angle |
 | `results/symmetry_plane.csv` | per image: error of the detected plane, true view angle |
 
 Points are in the camera frame, up to scale, so `--align camera` (one scale factor, nothing
 else) is the fair evaluation. Status values: `ok`, `no_symmetry` (no plane accepted),
-`frontal`, `side`, `few_features`, `no_object`, `error`. Images without an accepted plane
-get no prediction file. `--help` lists the parameters.
+`frontal`, `side`, `few_features`, `no_object`, `error`; with `--box-only` also `no_frame`
+(not upright or not box-like) and `no_box`. Images without a result get no prediction
+file. `--help` lists the parameters.
 
 ## Results
 
@@ -135,81 +171,126 @@ F-score at 5 % of the object size, camera alignment, everywhere.
 ### Rendered objects (`run.py --demo`)
 
 Plane and shape are known here. The error of the normal is measured to the nearest symmetry
-plane of the object.
+plane of the object (the chair has one, the table two, the cabinet three).
 
-With a mirror-symmetric texture (`auto`). The edges refuse in all images but one
-(`not_box`, the texture has edges in all directions) and the feature pairs find the plane:
+With a mirror-symmetric texture (`auto`). The edges refuse most images (the texture has
+edges in all directions) and the feature pairs find the plane. F-score of the matched
+points and of the silhouette intersection:
 
-| object | azimuth | plane error | accuracy | completeness | F-score | hull F-score |
-|---|---|---|---|---|---|---|
-| chair | 15 / 30 / 45 / 60 deg | 1.1 / 1.4 / 0.1 / 1.2 deg | 0.010 / 0.009 / 0.007 / 0.007 | 0.026 / 0.025 / 0.038 / 0.046 | 0.95 / 0.96 / 0.92 / 0.85 | 0.33 / 0.45 / 0.57 / 0.62 |
-| table | 15 / 30 deg | 0.1 / 2.2 deg | 0.008 / 0.033 | 0.048 / 0.029 | 0.91 / 0.90 | 0.36 / 0.41 |
-| table | 45 / 60 deg | no plane accepted | | | | |
-| cabinet | 15 / 30 / 45 deg | 0.0 / 0.0 / 0.5 deg | 0.006 / 0.006 / 0.006 | 0.109 / 0.074 / 0.049 | 0.55 / 0.59 / 0.67 | 0.43 / 0.41 / 0.47 |
-| cabinet | 60 deg | no plane accepted | | | | |
+| object | azimuth | plane from | plane error | matched points | silhouette intersection |
+|---|---|---|---|---|---|
+| chair | 15 / 30 / 45 / 60 deg | features / edges / features / features | 0.0 / 2.2 / 0.1 / 1.2 deg | 0.98 / 0.93 / 0.92 / 0.85 | 0.44 / 0.77 / 0.57 / 0.62 |
+| table | 15 / 30 deg | features / edges | 0.1 / 0.5 deg | 0.91 / 0.82 | 0.36 / 0.89 |
+| table | 45 / 60 deg | no plane accepted | | | |
+| cabinet | 15 / 30 / 45 deg | features | 0.0 / 0.0 / 0.5 deg | 0.55 / 0.59 / 0.67 | 0.43 / 0.41 / 0.47 |
+| cabinet | 60 deg | no plane accepted | | | |
 
-The chair at 15 deg is the one image where the edges are accepted.
+The two images with the plane from the edges are the two with a box.
 
 Without texture, only shaded faces and the outline (`--demo-plain`). The feature pairs find
-no plane in any of the twelve images; the edges do:
+no plane in any of these images, and the matched points are of no use (F-score below 0.25:
+the dense search has nothing to compare). F-score of the silhouette intersection:
 
-| object | azimuth | plane error | planes used | hull F-score |
-|---|---|---|---|---|
-| chair | 15 / 30 / 45 / 60 deg | 0.0 / 0.1 / 0.1 / 0.1 deg | 2 / 1 / 1 / 1 | 0.34 / 0.38 / 0.39 / 0.55 |
-| table | 15 / 30 / 45 / 60 deg | 0.0 / 0.0 / 0.0 / 0.0 deg | 2 / 2 / 2 / 2 | 0.85 / 0.83 / 0.77 / 0.70 |
-| cabinet | 15 / 30 / 45 / 60 deg | 0.1 / 0.0 / 0.0 / 0.1 deg | 3 / 3 / 3 / 3 | 0.45 / 0.52 / 0.66 / 0.72 |
+| object | azimuth | plane from the edges | two cones | two cones and box | box alone |
+|---|---|---|---|---|---|
+| chair | 15 / 30 deg | 0.0 / 0.0 deg | 0.21 / 0.38 | 0.74 / 0.77 | 0.73 / 0.76 |
+| chair | 45 / 60 deg | refused (ambiguous, unconfirmed) | | | 0.80 / 0.80 |
+| table | 15 / 30 / 60 deg | 0.0 / 0.0 / 0.0 deg | 0.42 / 0.35 / 0.47 | 0.91 / 0.89 / 0.86 | 0.91 / 0.90 / 0.90 |
+| table | 45 deg | refused (ambiguous) | | | 0.89 |
+| cabinet | 15 deg | 0.1 deg | 0.18 | 1.00 | 1.00 |
+| cabinet | 30 / 45 / 60 deg | refused (few edges, ambiguous) | | | 1.00 / 1.00 / 1.00 |
 
-The chair has one symmetry plane, the table two, the cabinet three. The second plane of
-the chair at 15 deg is one it does not have, see "Where it breaks".
+### Pix3D, evaluation subset
 
-The matched points are of no use on these images (F-score below 0.25): without texture the
-dense search has nothing to compare.
-
-### Pix3D
-
-50 photos, 38 of them with a mirror-symmetric CAD model. All thresholds were set on 45
-other Pix3D images (`configs/dev_pix3d.txt`), not on the subset.
+50 photos, 38 of them with a mirror-symmetric CAD model.
 
 | | plane from feature pairs | plane from edges |
 |---|---|---|
-| plane accepted | 5 of 50 | 6 of 50 |
-| accepted planes within 5 deg of a symmetry plane of the model | 0 | 4 |
+| plane accepted | 5 of 50 | 10 of 50 |
+| accepted planes within 5 deg of a symmetry plane of the model | 0 | 7 |
 | rejected because the view is frontal or from the side | 10 | 4 |
 
 | row of `results/shape_summary.md` | plane | reconstruction | images | accuracy | completeness | F-score |
 |---|---|---|---|---|---|---|
 | `symmetry_features` | feature pairs | matched points | 5 | 0.095 | 0.192 | 0.12 |
 | `symmetry_features_hull` | feature pairs | two cones | 5 | 0.206 | 0.038 | 0.33 |
-| `symmetry_twocones_hull` | edges | two cones | 6 | 0.154 | 0.051 | 0.36 |
-| `symmetry_hull` | edges | cones of all accepted planes | 6 | 0.080 | 0.047 | 0.58 |
-| `symmetry` | edges | matched points | 3 | 0.027 | 0.226 | 0.06 |
+| `symmetry_twocones_hull` | edges | two cones | 10 | 0.193 | 0.047 | 0.37 |
+| `symmetry_hull` | edges | two cones and box | 10 | 0.040 | 0.029 | 0.77 |
+| `box_hull` | none | box alone | 31 | 0.049 | 0.033 | 0.73 |
+| `symmetry` | edges | matched points | 7 | 0.020 | 0.259 | 0.06 |
 | `symmetry_trueplane_hull` | CAD model (analysis) | two cones | 29 | 0.122 | 0.040 | 0.48 |
 
-Of the six accepted images four use two planes and two use three. On these six images the
-true plane with two cones reaches 0.45.
+Why the edges give no plane in 36 photos: unconfirmed 9, uncertain 8, not box-like 7, few
+edges 5, tilted 4, ambiguous 2, no lines 1. Four more are frontal views. The box alone has
+no result for 19 photos: 12 without a usable frame, 7 without a box.
 
-Why the edges refuse 40 of the 50 photos: not box-like 23 (mostly beds, chairs, sofas and
-tools), too small 11, no vertical axis 3, uncertain 2, no lines 1. On the 45 development images
-the same settings accept 12 planes, 11 of them within 5 deg, with a hull F-score of 0.58.
-These numbers are optimistic, because the thresholds were chosen on those images; the
-subset also has more small images (11 against 7).
+### Pix3D, held-out list
+
+639 photos that took no part in any choice, 577 of them with a mirror-symmetric CAD model.
+Rows of `results/shape_holdout_summary.md`.
+
+| | images | accuracy | completeness | F-score |
+|---|---|---|---|---|
+| plane from edges accepted | 166 | | | |
+| of these within 5 deg of a symmetry plane of the model | 122 | | | |
+| `holdout_twocones_hull`: two cones | 166 | 0.159 | 0.044 | 0.40 |
+| `holdout_symmetry_hull`: two cones and box | 166 | 0.035 | 0.023 | 0.83 |
+| `holdout_box_hull`: box alone | 431 | 0.060 | 0.034 | 0.74 |
+
+By category (images, planes accepted, of these within 5 deg, F-score with two cones, with
+two cones and box; images with a result of the box alone and their F-score):
+
+| category | images | accepted | within 5 deg | two cones | two cones and box | box alone: images | box alone: F-score |
+|---|---|---|---|---|---|---|---|
+| bed | 90 | 32 | 29 | 0.39 | 0.73 | 74 | 0.67 |
+| bookcase | 62 | 35 | 29 | 0.44 | 0.93 | 51 | 0.89 |
+| chair | 90 | 4 | 2 | 0.48 | 0.69 | 33 | 0.47 |
+| desk | 90 | 36 | 17 | 0.43 | 0.81 | 78 | 0.79 |
+| misc | 27 | 2 | 0 | 0.36 | 0.68 | 4 | 0.57 |
+| sofa | 90 | 14 | 9 | 0.26 | 0.72 | 73 | 0.65 |
+| table | 90 | 23 | 19 | 0.42 | 0.82 | 62 | 0.75 |
+| tool | 20 | 0 | 0 | | | 2 | 0.08 |
+| wardrobe | 80 | 20 | 17 | 0.38 | 0.96 | 54 | 0.93 |
+| all | 639 | 166 | 122 | 0.40 | 0.83 | 431 | 0.74 |
+
+By the true view angle: of the 142 planes accepted at 10 to 45 deg, 121 are right; of the
+16 accepted beyond 45 deg, one is. 85 further images are recognised as frontal views; the
+box alone has a result for 47 of them (F-score 0.77).
+What the mirrored camera adds to the box: on the 160 photos that have both results, the
+box alone reaches 0.83, two cones and box 0.84, two cones alone 0.41.
+On the first list (the one the limits were chosen on) 187 planes are accepted and 149 of
+the 178 on symmetric models are within 5 deg.
 
 ## Where it breaks
 
 Plane from the edges:
 
 - It needs a box-like object: straight edges in three perpendicular directions. Chairs,
-  sofas and beds with curved or slanted parts are refused, and so is every round object.
-- Seen from the side, the depth of the object shows more edges than its width, and the
-  wrong horizontal axis is taken (one of the two wrong planes on the subset, a desk at
-  54 deg). For an object that is symmetric both ways this does no harm.
+  sofas and round objects are mostly refused (4 of 90 held-out chairs get a plane).
+- The front-view rule is wrong for an object photographed from its side: beyond 45 deg the
+  depth axis is taken for the normal. For an object that is symmetric both ways (a table)
+  this does no harm.
+- Desks: many CAD models have drawers on one side and are symmetric front to back only.
+  The rule takes the long front edge for the normal, as a person would, and counts as
+  wrong (17 of 36 held-out desks right). The outline is nearly symmetric both ways, so the
+  shape does not suffer.
 - With a long lens the edges of one direction are almost parallel in the image, and the
   component of `n` along the viewing direction is poorly fixed unless edges of all three
-  directions are visible. Most such cases are refused as `uncertain`; the other wrong plane
-  of the subset (12 deg off) passed just below the limit.
-- Small photos: the edges of an object of 300 pixels are too short and too soft.
+  directions are visible. These cases are refused as `uncertain`.
 - Shadow borders and the inner edges of shelves are straight too, but point elsewhere.
-- A frontal product photo gives the plane very precisely and no depth (3 subset images).
+- A frontal product photo gives the plane very precisely and no depth.
+
+Box:
+
+- It is the bounding box, exact only for a box. A table gets its top and legs from the
+  cones inside the box; an armchair is cut to a box it does not fill.
+- A round outline touches the tangents where a box would have no corner; the box comes out
+  too small. Such objects are usually refused before as not box-like.
+- The box is right only if the three axes are. It does not depend on which horizontal
+  axis is the normal, so a wrong choice between front and side does not hurt it.
+- It is not a result of the symmetry. On the photos the box alone reaches almost the score
+  of two cones and box together (0.83 against 0.84 on the same held-out photos); the
+  mirrored camera adds little once the box is there.
 
 Plane from the feature pairs, and the matched points:
 
@@ -222,24 +303,13 @@ Plane from the feature pairs, and the matched points:
 - Repeated parts along the symmetry direction (slats, legs, drawers) give several equally
   good partners on an epipolar line. A patch correlation picks one of them at random; a
   higher correlation does not mean a better match. With the true plane only 29 % of the
-  dense matches are within 3 % of the true depth (development images).
+  dense matches are within 3 % of the true depth.
 - Faces whose mirror image is hidden (the side of a cabinet) cannot be matched.
 
 Silhouette intersection:
 
-- It needs only the planes and the mask and is the part that carries over to photos, but
-  it is an outer bound, not the surface. Cones cannot see concavities, and over a flat face
-  a wedge remains between the cones of two cameras that look at it from both sides. A
-  cabinet stays at an F-score of about 0.5 even with three planes; a table with two planes
-  reaches 0.7 to 0.8.
-- The coverage test for a further plane is weak when the camera looks almost along the
-  first plane. Points in the empty space between the parts of the object then satisfy all
-  cones, and a plane that the object does not have is accepted: the rendered chair at
-  15 deg gets a second plane (coverage 0.98). The result is still closer to the chair than
-  the two cones alone, which are wide open at this angle (F-score 0.34 against 0.25), but
-  its extent in depth is then invented. On the photos the further planes helped also where
-  the CAD model is not symmetric that way, because the outline of box-like furniture
-  nearly is.
-- The F-score of this bound reacts little to a wrong plane (a desk with the plane 89 deg
-  off still scores 0.79, because its outline is nearly symmetric that way too). The plane
-  error is the number that says whether the plane is right.
+- Two cones alone are an outer bound, not the surface: open along the symmetry plane, the
+  more the smaller the view angle, with a wedge over every flat face, and blind to
+  concavities. Seen from above, the two cones around a rectangular desk form a rhombus.
+- The F-score of this bound reacts little to a wrong plane. The plane error is the number
+  that says whether the plane is right.
