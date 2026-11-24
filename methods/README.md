@@ -23,7 +23,7 @@ subset even if a method clearly fails on some images; the failures are part of t
 | folder | type | data | evaluation |
 |---|---|---|---|
 | `sfs/` | classical, from scratch | NYU (+ a few Blender renders) | `eval_depth.py --align affine --normals` |
-| `symmetry/` | classical, from scratch | Pix3D | `eval_shape.py --align camera` (also writes the variant `symmetry_hull`) |
+| `symmetry/` | classical, from scratch | Pix3D | `eval_shape.py --method symmetry_hull --align camera` (`symmetry` holds the matched points only) |
 | `depth_anything_v2/` | pretrained, own fine-tune | NYU | `eval_depth.py` (metric) |
 | `triposr/` | pretrained | Pix3D | `eval_shape.py` |
 
