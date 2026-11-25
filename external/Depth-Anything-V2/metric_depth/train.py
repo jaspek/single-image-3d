@@ -17,7 +17,9 @@ from torch.utils.tensorboard import SummaryWriter
 from dataset.hypersim import Hypersim
 from dataset.kitti import KITTI
 from dataset.vkitti2 import VKITTI2
+from dataset.nyu import NYU
 from depth_anything_v2.dpt import DepthAnythingV2
+from si3d.datasets.nyu import NYUDepthV2
 from util.dist_helper import setup_distributed
 from util.loss import SiLogLoss
 from util.metric import eval_depth
@@ -27,7 +29,8 @@ from util.utils import init_log
 parser = argparse.ArgumentParser(description='Depth Anything V2 for Metric Depth Estimation')
 
 parser.add_argument('--encoder', default='vitl', choices=['vits', 'vitb', 'vitl', 'vitg'])
-parser.add_argument('--dataset', default='hypersim', choices=['hypersim', 'vkitti'])
+parser.add_argument('--dataset', default='hypersim', choices=['hypersim', 'vkitti','nyu'])
+parser.add_argument('--dataset-root',default='data/nyu',type=str)
 parser.add_argument('--img-size', default=518, type=int)
 parser.add_argument('--min-depth', default=0.001, type=float)
 parser.add_argument('--max-depth', default=20, type=float)
@@ -63,6 +66,8 @@ def main():
         trainset = Hypersim('dataset/splits/hypersim/train.txt', 'train', size=size)
     elif args.dataset == 'vkitti':
         trainset = VKITTI2('dataset/splits/vkitti2/train.txt', 'train', size=size)
+    elif args.dataset == 'nyu':    
+        trainset = NYU(args.dataset_root,'train',size=size)
     else:
         raise NotImplementedError
     trainsampler = torch.utils.data.distributed.DistributedSampler(trainset)
@@ -72,6 +77,8 @@ def main():
         valset = Hypersim('dataset/splits/hypersim/val.txt', 'val', size=size)
     elif args.dataset == 'vkitti':
         valset = KITTI('dataset/splits/kitti/val.txt', 'val', size=size)
+    elif args.dataset == 'nyu':
+        valset = NYU(args.dataset_root,'val',size=size)
     else:
         raise NotImplementedError
     valsampler = torch.utils.data.distributed.DistributedSampler(valset)
@@ -88,7 +95,8 @@ def main():
     model = DepthAnythingV2(**{**model_configs[args.encoder], 'max_depth': args.max_depth})
     
     if args.pretrained_from:
-        model.load_state_dict({k: v for k, v in torch.load(args.pretrained_from, map_location='cpu').items() if 'pretrained' in k}, strict=False)
+        #model.load_state_dict({k: v for k, v in torch.load(args.pretrained_from, map_location='cpu').items() if 'pretrained' in k}, strict=False)
+        model.load_state_dict(args.pretrained_from,map_location='cpu',strict=True);
     
     model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
     model.cuda(local_rank)
@@ -206,6 +214,15 @@ def main():
                 'previous_best': previous_best,
             }
             torch.save(checkpoint, os.path.join(args.save_path, 'latest.pth'))
+
+        cur_abs_rel = (results['abs_rel']/nsamples).item()
+        if rank == 0 and cur_abs_rel < previous_best['abs_rel']:
+            torch.save({
+                'model': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'epoch': epoch,
+                'previous_best': previous_best,
+            }, os.path.join(args.save_path,'best.pth'))
 
 
 if __name__ == '__main__':
