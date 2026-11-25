@@ -46,7 +46,7 @@ parser.add_argument('--port', default=None, type=int)
 def main():
     args = parser.parse_args()
     
-    warnings.simplefilter('ignore', np.RankWarning)
+    warnings.simplefilter('ignore', np.exceptions.RankWarning)
     
     logger = init_log('global', logging.INFO)
     logger.propagate = 0
