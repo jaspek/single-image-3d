@@ -35,6 +35,7 @@ parser.add_argument('--img-size', default=518, type=int)
 parser.add_argument('--min-depth', default=0.001, type=float)
 parser.add_argument('--max-depth', default=20, type=float)
 parser.add_argument('--epochs', default=40, type=int)
+parser.add_argument('--num-workers',default=2,type=int)
 parser.add_argument('--bs', default=2, type=int)
 parser.add_argument('--lr', default=0.000005, type=float)
 parser.add_argument('--pretrained-from', type=str)
@@ -82,7 +83,7 @@ def main():
     else:
         raise NotImplementedError
     valsampler = torch.utils.data.distributed.DistributedSampler(valset)
-    valloader = DataLoader(valset, batch_size=1, pin_memory=True, num_workers=4, drop_last=True, sampler=valsampler)
+    valloader = DataLoader(valset, batch_size=1, pin_memory=True, num_workers=args.num_workers, drop_last=True, sampler=valsampler)
     
     local_rank = int(os.environ["LOCAL_RANK"])
     
@@ -96,7 +97,9 @@ def main():
     
     if args.pretrained_from:
         #model.load_state_dict({k: v for k, v in torch.load(args.pretrained_from, map_location='cpu').items() if 'pretrained' in k}, strict=False)
-        model.load_state_dict(args.pretrained_from,map_location='cpu',strict=True);
+        ckpt = torch.load(args.pretrained_from, map_location='cpu')
+        state_dict = ckpt['model'] if 'model' in ckpt else ckpt
+        model.load_state_dict(state_dict, strict=True)
     
     model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
     model.cuda(local_rank)
